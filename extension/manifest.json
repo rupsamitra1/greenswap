@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "GreenSwap",
+  "version": "0.7.0",
+  "description": "Shows a verified greener alternative -- same price or cheaper -- right on the product page.",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost/store/*",
+        "https://www.amazon.com/*"
+      ],
+      "js": [
+        "scrapers.js",
+        "content.js"
+      ],
+      "css": [
+        "panel.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "fonts/*",
+        "icons/logo.png"
+      ],
+      "matches": [
+        "http://localhost/*",
+        "https://www.amazon.com/*"
+      ]
+    }
+  ],
+  "action": {
+    "default_title": "GreenSwap"
+  }
+}

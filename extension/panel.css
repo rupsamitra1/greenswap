@@ -1,0 +1,6 @@
+/* The card itself is styled inside its shadow root (see content.js).
+   This file only governs the host element on the retailer's page. */
+#greenswap-host {
+  all: initial;
+  display: block; /* must follow `all`, which would otherwise reset it to inline */
+}

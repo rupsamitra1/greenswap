@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -52,13 +53,32 @@ if STORE_DIR.is_dir():
 # ---------------------------------------------------------------------------
 # Config -- set these in .env (see .env.example). Never hardcode keys.
 # ---------------------------------------------------------------------------
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+def _clean(value: str | None) -> str | None:
+    """Trim whitespace and stray quotes.
 
-AZURE_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-AZURE_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
-AZURE_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
+    Pasting a key out of the Azure portal very often brings along a trailing
+    newline or a pair of quotes, which produces a 401 that looks like a bad
+    key rather than a bad paste.
+    """
+    if value is None:
+        return None
+    return value.strip().strip('"').strip("'") or None
+
+
+SUPABASE_URL = _clean(os.getenv("SUPABASE_URL"))
+SUPABASE_KEY = _clean(os.getenv("SUPABASE_SERVICE_KEY"))
+
+AZURE_ENDPOINT = _clean(os.getenv("AZURE_OPENAI_ENDPOINT"))
+AZURE_API_KEY = _clean(os.getenv("AZURE_OPENAI_API_KEY"))
+AZURE_DEPLOYMENT = _clean(os.getenv("AZURE_OPENAI_DEPLOYMENT")) or "gpt-4o-mini"
+AZURE_API_VERSION = _clean(os.getenv("AZURE_OPENAI_API_VERSION")) or "2024-10-21"
+
+if AZURE_ENDPOINT and not AZURE_ENDPOINT.endswith("/"):
+    AZURE_ENDPOINT += "/"
+
+# Surfaced by /health and /selftest so a misconfigured key is visible rather
+# than silently degrading into the offline fallback.
+azure_status: dict = {"calls": 0, "failures": 0, "last_error": None}
 
 # An alternative must beat the original by this much to be worth suggesting.
 ECO_SCORE_MARGIN = 10
@@ -249,12 +269,28 @@ Respond ONLY with JSON, no markdown fences, in this exact shape:
 {
   "category": "one of: cleaning, bottles, personal_care, kitchen, other",
   "materials": ["list", "of", "likely", "materials"],
-  "eco_score": 0-100 integer (100 = most sustainable),
+  "eco_score": 0-100 integer,
   "reason": "one plain-English sentence explaining the score"
 }
 
-Be conservative: if uncertain, score lower and say why. Never invent a
-certification -- you are estimating, not verifying."""
+Score against this rubric, so that scores mean the same thing across products:
+
+  0-30   Single-use or disposable. Virgin plastic, non-recyclable packaging,
+         harsh or petroleum-derived chemistry, sold in bulk to be thrown away.
+  31-60  Mixed. Partly recyclable, or durable but made from high-impact
+         materials, or a refill option exists but is not the default.
+  61-85  Durable and reusable, or plant-derived and readily biodegradable,
+         with modest packaging.
+  86-100 Reusable or refillable AND made from recycled/renewable material,
+         with minimal or plastic-free packaging.
+
+Be conservative: when the listing does not say, assume the commonplace version
+of that product rather than the best case, score toward the lower end of the
+band, and say in `reason` what you could not determine.
+
+Never invent a certification. You are estimating, not verifying — certification
+is established elsewhere, from a database, and claiming one here would be a
+false verification."""
 
 
 def offline_estimate(product: Product) -> dict:
@@ -265,16 +301,13 @@ def offline_estimate(product: Product) -> dict:
         "materials": ["unknown"],
         "eco_score": 40,
         "reason": (
-            "Scored cautiously from the product name alone -- AI analysis is "
-            "not configured, so materials could not be inferred."
+            "Scored cautiously from the product name alone — AI analysis "
+            "is not configured, so materials could not be inferred."
         ),
     }
 
 
-def estimate_with_ai(product: Product) -> dict:
-    if not azure_client:
-        return offline_estimate(product)
-
+def build_listing(product: Product) -> str:
     listing = f"Title: {product.title}"
     if product.brand:
         listing += f"\nBrand: {product.brand}"
@@ -282,27 +315,50 @@ def estimate_with_ai(product: Product) -> dict:
         listing += f"\nPrice: ${product.price}"
     if product.bullets:
         listing += "\nDetails:\n" + "\n".join(f"- {b}" for b in product.bullets[:8])
+    return listing
 
+
+def call_azure(listing: str) -> dict:
+    """One model call. Raises on failure so callers can decide what to do."""
+    resp = azure_client.chat.completions.create(
+        model=AZURE_DEPLOYMENT,  # on Azure this is the DEPLOYMENT name
+        messages=[
+            {"role": "system", "content": ESTIMATE_PROMPT},
+            {"role": "user", "content": listing},
+        ],
+        temperature=0,
+        response_format={"type": "json_object"},
+    )
+    return json.loads(resp.choices[0].message.content)
+
+
+def estimate_with_ai(product: Product) -> dict:
+    if not azure_client:
+        return offline_estimate(product)
+
+    azure_status["calls"] += 1
     try:
-        resp = azure_client.chat.completions.create(
-            model=AZURE_DEPLOYMENT,  # on Azure this is the deployment name
-            messages=[
-                {"role": "system", "content": ESTIMATE_PROMPT},
-                {"role": "user", "content": listing},
-            ],
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
-        return json.loads(resp.choices[0].message.content)
-    except (json.JSONDecodeError, KeyError):
+        result = call_azure(build_listing(product))
+        # Clamp rather than trust: a stray score would corrupt the comparison
+        # against catalog scores, which decides what gets recommended.
+        result["eco_score"] = max(0, min(100, int(result.get("eco_score", 40))))
+        azure_status["last_error"] = None
+        return result
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        azure_status["failures"] += 1
+        azure_status["last_error"] = f"bad response: {exc}"
         return {
             "category": guess_category(product.title),
             "materials": ["unknown"],
             "eco_score": 40,
             "reason": "Could not parse the AI response; defaulted to a cautious score.",
         }
-    except Exception:
-        # Network/auth/quota trouble should never take the demo down.
+    except Exception as exc:
+        # Network/auth/quota trouble must never take the page down -- but it
+        # must not vanish either, or a bad key looks exactly like a working one.
+        azure_status["failures"] += 1
+        azure_status["last_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[GreenSwap] Azure call failed: {azure_status['last_error']}")
         return offline_estimate(product)
 
 
@@ -479,5 +535,73 @@ def health():
         "ok": True,
         "supabase": bool(supabase),
         "azure_openai": bool(azure_client),
+        "azure_deployment": AZURE_DEPLOYMENT if azure_client else None,
+        "azure_calls": azure_status["calls"],
+        "azure_failures": azure_status["failures"],
+        "azure_last_error": azure_status["last_error"],
         "cached_estimates": len(_memory_cache) if not supabase else None,
     }
+
+
+@app.get("/selftest")
+def selftest():
+    """One real model call, bypassing the cache, reporting the actual error.
+
+    This exists because every failure path in /analyze degrades gracefully --
+    which is right for shoppers and useless for setup. Hit this after dropping
+    in a key to find out whether it actually works.
+    """
+    if not azure_client:
+        missing = [
+            name
+            for name, value in (
+                ("AZURE_OPENAI_ENDPOINT", AZURE_ENDPOINT),
+                ("AZURE_OPENAI_API_KEY", AZURE_API_KEY),
+            )
+            if not value
+        ]
+        return {
+            "ok": False,
+            "reason": "Azure client not configured",
+            "missing_env": missing,
+            "hint": "Create backend/.env from .env.example, then restart the server.",
+        }
+
+    sample = Product(
+        title="Disposable Plastic Water Bottles, 24 Pack",
+        brand="HydroBasic",
+        price=12.99,
+        bullets=["Lightweight PET plastic construction", "Single-use"],
+    )
+    started = time.perf_counter()
+    try:
+        result = call_azure(build_listing(sample))
+        return {
+            "ok": True,
+            "deployment": AZURE_DEPLOYMENT,
+            "api_version": AZURE_API_VERSION,
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+            "result": result,
+        }
+    except Exception as exc:
+        message = str(exc)
+        hint = "Unexpected error — check the endpoint and deployment name."
+        low = message.lower()
+        if "401" in message or "access denied" in low or "unauthorized" in low:
+            hint = "Key rejected. Check AZURE_OPENAI_API_KEY matches this resource."
+        elif "404" in message or "not found" in low:
+            hint = (
+                "Deployment not found. AZURE_OPENAI_DEPLOYMENT must be the "
+                "deployment name you chose in Azure AI Foundry, not the model name."
+            )
+        elif "429" in message:
+            hint = "Rate limited or out of quota for this deployment."
+        elif "getaddrinfo" in low or "connect" in low:
+            hint = "Endpoint unreachable. Check AZURE_OPENAI_ENDPOINT."
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {message}",
+            "hint": hint,
+            "deployment": AZURE_DEPLOYMENT,
+            "endpoint_set": bool(AZURE_ENDPOINT),
+        }
