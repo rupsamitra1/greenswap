@@ -73,12 +73,24 @@ AZURE_API_KEY = _clean(os.getenv("AZURE_OPENAI_API_KEY"))
 AZURE_DEPLOYMENT = _clean(os.getenv("AZURE_OPENAI_DEPLOYMENT")) or "gpt-4o-mini"
 AZURE_API_VERSION = _clean(os.getenv("AZURE_OPENAI_API_VERSION")) or "2024-10-21"
 
-if AZURE_ENDPOINT and not AZURE_ENDPOINT.endswith("/"):
-    AZURE_ENDPOINT += "/"
+if AZURE_ENDPOINT:
+    # The portal offers a full "target URI" like
+    #   https://res.openai.azure.com/openai/deployments/x/chat/completions?api-version=...
+    # The SDK wants only the resource root; pasting the whole thing yields a
+    # 404 that reads like a wrong deployment name.
+    if "/openai/" in AZURE_ENDPOINT:
+        AZURE_ENDPOINT = AZURE_ENDPOINT.split("/openai/")[0]
+    if not AZURE_ENDPOINT.startswith("http"):
+        AZURE_ENDPOINT = "https://" + AZURE_ENDPOINT
+    if not AZURE_ENDPOINT.endswith("/"):
+        AZURE_ENDPOINT += "/"
+
+# A hung call must not hold a product page waiting.
+REQUEST_TIMEOUT = float(_clean(os.getenv("AZURE_OPENAI_TIMEOUT")) or 20)
 
 # Surfaced by /health and /selftest so a misconfigured key is visible rather
 # than silently degrading into the offline fallback.
-azure_status: dict = {"calls": 0, "failures": 0, "last_error": None}
+azure_status: dict = {"calls": 0, "failures": 0, "last_error": None, "json_mode": True}
 
 # An alternative must beat the original by this much to be worth suggesting.
 ECO_SCORE_MARGIN = 10
@@ -97,6 +109,8 @@ if AZURE_ENDPOINT and AZURE_API_KEY:
         azure_endpoint=AZURE_ENDPOINT,
         api_key=AZURE_API_KEY,
         api_version=AZURE_API_VERSION,
+        timeout=REQUEST_TIMEOUT,
+        max_retries=2,
     )
 
 # Used only when Supabase is not configured, so the cache still works locally.
@@ -318,18 +332,99 @@ def build_listing(product: Product) -> str:
     return listing
 
 
-def call_azure(listing: str) -> dict:
-    """One model call. Raises on failure so callers can decide what to do."""
-    resp = azure_client.chat.completions.create(
-        model=AZURE_DEPLOYMENT,  # on Azure this is the DEPLOYMENT name
-        messages=[
+ALLOWED_CATEGORIES = {"cleaning", "bottles", "personal_care", "kitchen", "other"}
+
+
+def parse_model_json(text: str) -> dict:
+    """Parse the reply, tolerating markdown fences and surrounding prose.
+
+    JSON mode makes this unnecessary, but not every Azure deployment supports
+    JSON mode, and the fallback path below lands here.
+    """
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"```\s*$", "", text).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            return json.loads(text[start : end + 1])
+        raise
+
+
+def normalize_estimate(raw: dict, product_title: str) -> dict:
+    """Never trust the shape of model output.
+
+    eco_score especially: it is compared numerically against catalog scores to
+    decide what gets recommended, so a string or an out-of-range number would
+    quietly distort recommendations rather than fail loudly.
+    """
+    category = str(raw.get("category", "")).strip().lower()
+    if category not in ALLOWED_CATEGORIES:
+        category = guess_category(product_title)
+
+    try:
+        score = int(float(raw.get("eco_score", 40)))
+    except (TypeError, ValueError):
+        score = 40
+    score = max(0, min(100, score))
+
+    materials = raw.get("materials") or []
+    if isinstance(materials, str):
+        materials = [materials]
+    materials = [str(m) for m in materials][:10]
+
+    reason = str(raw.get("reason") or "").strip() or (
+        "Estimated from the listing; it gave little detail about materials."
+    )
+
+    return {
+        "category": category,
+        "materials": materials,
+        "eco_score": score,
+        "reason": reason,
+    }
+
+
+def _azure_create(listing: str, json_mode: bool) -> dict:
+    kwargs = {
+        "model": AZURE_DEPLOYMENT,  # on Azure this is the DEPLOYMENT name
+        "messages": [
             {"role": "system", "content": ESTIMATE_PROMPT},
             {"role": "user", "content": listing},
         ],
-        temperature=0,
-        response_format={"type": "json_object"},
-    )
-    return json.loads(resp.choices[0].message.content)
+        "temperature": 0,
+    }
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    resp = azure_client.chat.completions.create(**kwargs)
+    return parse_model_json(resp.choices[0].message.content)
+
+
+def call_azure(listing: str) -> dict:
+    """One estimate, surviving the two failures actually worth surviving.
+
+    Older deployments reject response_format outright. Rather than making
+    whoever set up the key discover that from a stack trace, retry once
+    without JSON mode and lean on parse_model_json. A rate limit gets one
+    backed-off retry.
+    """
+    try:
+        return _azure_create(listing, json_mode=azure_status["json_mode"])
+    except Exception as exc:
+        message = str(exc).lower()
+        if azure_status["json_mode"] and any(
+            k in message for k in ("response_format", "json_object", "json mode")
+        ):
+            # Remember, so every later call skips the doomed attempt.
+            azure_status["json_mode"] = False
+            return _azure_create(listing, json_mode=False)
+        if "429" in message or "rate limit" in message:
+            time.sleep(2)
+            return _azure_create(listing, json_mode=azure_status["json_mode"])
+        raise
 
 
 def estimate_with_ai(product: Product) -> dict:
@@ -338,10 +433,8 @@ def estimate_with_ai(product: Product) -> dict:
 
     azure_status["calls"] += 1
     try:
-        result = call_azure(build_listing(product))
-        # Clamp rather than trust: a stray score would corrupt the comparison
-        # against catalog scores, which decides what gets recommended.
-        result["eco_score"] = max(0, min(100, int(result.get("eco_score", 40))))
+        raw = call_azure(build_listing(product))
+        result = normalize_estimate(raw, product.title)
         azure_status["last_error"] = None
         return result
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
@@ -575,13 +668,15 @@ def selftest():
     )
     started = time.perf_counter()
     try:
-        result = call_azure(build_listing(sample))
+        raw = call_azure(build_listing(sample))
         return {
             "ok": True,
             "deployment": AZURE_DEPLOYMENT,
             "api_version": AZURE_API_VERSION,
+            "json_mode": azure_status["json_mode"],
             "latency_ms": round((time.perf_counter() - started) * 1000),
-            "result": result,
+            "raw": raw,
+            "normalized": normalize_estimate(raw, sample.title),
         }
     except Exception as exc:
         message = str(exc)
