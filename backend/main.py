@@ -32,6 +32,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+def _ensure_env_file() -> None:
+    """Create .env from .env.example on first run.
+
+    .env is gitignored (it must be), so a fresh clone has no such file and
+    the operator has to know to copy the template first. Doing it here means
+    "drop your key in backend/.env" is literally the only step.
+    """
+    here = Path(__file__).resolve().parent
+    env, template = here / ".env", here / ".env.example"
+    if not env.exists() and template.exists():
+        env.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+        print(f"[GreenSwap] Created {env} from .env.example - add your Azure key there.")
+
+
+_ensure_env_file()
 load_dotenv()
 
 app = FastAPI(title="GreenSwap API")
