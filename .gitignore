@@ -20,3 +20,8 @@ node_modules/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Stray downloads that live in the repo root
+*.exe
+*.msi
+Undergraduate Research Email Guideline_Template.pdf
