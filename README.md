@@ -32,6 +32,9 @@ product page ──▶ content script scrapes title, price, brand, bullets
 
 Three design decisions carry the product:
 
+**The verified badge is a guarantee, not a label.** On a cache miss the model runs a short research loop (`backend/agent.py`): it may search the certification database, look up a certification programme's official reference, and search the catalog for cheaper greener options. It must then cite a source for anything it claims. Crucially, citations are checked against *recorded tool output* before they reach the shopper -- a model that invents "EPA Safer Choice", or cites a plausible-looking URL it never received, is silently downgraded to an estimate. Telling a model not to fabricate certifications is a request; discarding unsupported claims server-side is a guarantee. Set `GREENSWAP_AGENT=off` to fall back to a single classification call.
+
+
 **Certified before estimated.** The database is consulted first, and the model runs only when a product has no published materials. Every result the user sees is labeled `✓ Verified` or `~ AI estimated`, so nobody has to take an opaque eco-score on faith. This is the answer to the 55% of consumers who distrust sustainability claims.
 
 **Price is a ceiling by default, and only the shopper can lift it.** `find_alternatives` never returns anything costing more than the original. When nothing qualifies, `find_pricier` offers greener-but-dearer options — but the card keeps them behind an explicit "show N that cost more" button, so a pricier suggestion is always something the shopper asked for. The unprompted answer stays "same price or cheaper, or nothing at all."
@@ -41,6 +44,16 @@ When the price cannot be scraped at all, the ceiling cannot be enforced, so the 
 **Estimates are cached across users.** Running a model on every product page every shopper opens is the cost problem flagged in the Week 4 reflection. Estimates are keyed by a normalized hash of brand + title in `ai_estimates`, so the hundredth shopper to view a product pays nothing.
 
 ---
+
+## Tests
+
+```bash
+cd backend
+python tests/test_azure.py   # single-call paths: parsing, retries, error handling
+python tests/test_agent.py   # the research loop and its citation enforcement
+```
+
+Both stub the Azure client, so they need no key and no network.
 
 ## Setup
 

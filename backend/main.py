@@ -26,6 +26,7 @@ import re
 import time
 from pathlib import Path
 
+import agent as agent_mod
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -105,7 +106,10 @@ REQUEST_TIMEOUT = float(_clean(os.getenv("AZURE_OPENAI_TIMEOUT")) or 20)
 
 # Surfaced by /health and /selftest so a misconfigured key is visible rather
 # than silently degrading into the offline fallback.
-azure_status: dict = {"calls": 0, "failures": 0, "last_error": None, "json_mode": True}
+AGENT_ENABLED = (_clean(os.getenv("GREENSWAP_AGENT")) or "on").lower() != "off"
+
+azure_status: dict = {"calls": 0, "failures": 0, "last_error": None, "json_mode": True,
+                       "agent_runs": 0, "agent_failures": 0}
 
 # An alternative must beat the original by this much to be worth suggesting.
 ECO_SCORE_MARGIN = 10
@@ -235,17 +239,36 @@ def guess_category(text: str) -> str:
 # Step 1: certified lookup (ground truth)
 # ---------------------------------------------------------------------------
 def lookup_certified(title: str):
-    """Check whether the product matches a row in certified_products."""
-    if not supabase:
+    """Check whether the product matches a known certified product.
+
+    Falls back to the built-in catalog when Supabase is not configured --
+    otherwise the viewed product could never be verified without a database,
+    and the verified badge would be unreachable in the offline demo.
+    """
+    title = (title or "").strip()
+    if not title:
         return None
-    res = (
-        supabase.table("certified_products")
-        .select("*")
-        .ilike("name", f"%{title}%")
-        .limit(1)
-        .execute()
-    )
-    return res.data[0] if res.data else None
+
+    if supabase:
+        res = (
+            supabase.table("certified_products")
+            .select("*")
+            .ilike("name", f"%{title}%")
+            .limit(1)
+            .execute()
+        )
+        if res.data:
+            return res.data[0]
+        return None
+
+    needle = title.lower()
+    for row in FALLBACK_ALTERNATIVES:
+        if row.get("trust") != "certified":
+            continue
+        name = row["name"].lower()
+        if needle in name or name in needle:
+            return row
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +303,11 @@ def cache_put(key: str, product: Product, estimate: dict):
         "materials": estimate["materials"],
         "eco_score": estimate["eco_score"],
         "reason": estimate["reason"],
+        # Without these a cache hit would quietly drop the evidence and
+        # downgrade a verified product to an estimate.
+        "citations": estimate.get("citations") or [],
+        "verified": bool(estimate.get("verified")),
+        "certification": estimate.get("certification"),
     }
     if supabase:
         # upsert so concurrent shoppers viewing the same product cannot collide
@@ -328,6 +356,8 @@ def offline_estimate(product: Product) -> dict:
     return {
         "category": category,
         "materials": ["unknown"],
+        "citations": [],
+        "verified": False,
         "eco_score": 40,
         "reason": (
             "Scored cautiously from the product name alone — AI analysis "
@@ -448,7 +478,33 @@ def estimate_with_ai(product: Product) -> dict:
 
     azure_status["calls"] += 1
     try:
-        raw = call_azure(build_listing(product))
+        listing = build_listing(product)
+        if AGENT_ENABLED:
+            try:
+                raw = agent_mod.run_agent(
+                    azure_client, AZURE_DEPLOYMENT, listing,
+                    {"lookup_certified": lookup_certified,
+                     "find_alternatives": find_alternatives},
+                    parse_model_json,
+                )
+                result = normalize_estimate(raw, product.title)
+                # Carry the evidence through: these are already verified against
+                # recorded tool output by agent.verify_claims.
+                result["citations"] = raw.get("citations", [])
+                result["verified"] = bool(raw.get("verified"))
+                result["certification"] = raw.get("certification")
+                result["agent_steps"] = len(raw.get("tool_calls", []))
+                azure_status["agent_runs"] += 1
+                azure_status["last_error"] = None
+                return result
+            except Exception as exc:
+                # A failed research loop should cost the shopper nothing beyond
+                # the citations -- fall back to the single-call estimate.
+                azure_status["agent_failures"] += 1
+                azure_status["last_error"] = f"agent: {type(exc).__name__}: {exc}"
+                print(f"[GreenSwap] agent failed, using single call: {exc}")
+
+        raw = call_azure(listing)
         result = normalize_estimate(raw, product.title)
         azure_status["last_error"] = None
         return result
@@ -534,6 +590,18 @@ def find_pricier(category: str, min_score: int, above_price: float):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+def _program_citation(certification: str | None) -> list[dict]:
+    """Turn a certification name into a link the shopper can check."""
+    program = agent_mod.CERTIFICATION_PROGRAMS.get(str(certification or "").lower())
+    if not program:
+        return []
+    return [{
+        "claim": f"Certified under {program['name']}",
+        "source": program["name"],
+        "url": program["url"],
+    }]
+
+
 @app.post("/analyze")
 def analyze(product: Product):
     certified = lookup_certified(product.title)
@@ -549,6 +617,7 @@ def analyze(product: Product):
             "certification": certified.get("certification"),
             "materials": [],
             "reason": certified.get("reason", ""),
+            "citations": _program_citation(certified.get("certification")),
         }
         category = certified["category"]
     else:
@@ -560,15 +629,20 @@ def analyze(product: Product):
             estimate = estimate_with_ai(product)
             cache_put(key, product, estimate)
 
+        # The agent may have verified this against the certification database.
+        # agent.verify_claims has already discarded any certification a tool did
+        # not actually return, so trusting it here is safe.
+        verified = bool(estimate.get("verified"))
         original = {
             "name": product.title,
             "brand": product.brand or "",
             "price": product.price or 0,
             "eco_score": estimate["eco_score"],
-            "trust": "ai_estimated",
-            "certification": None,
+            "trust": "certified" if verified else "ai_estimated",
+            "certification": estimate.get("certification"),
             "materials": estimate.get("materials", []),
             "reason": estimate["reason"],
+            "citations": estimate.get("citations") or [],
         }
         category = estimate["category"]
 
