@@ -16,6 +16,14 @@ create table if not exists certified_products (
   created_at timestamptz default now()
 );
 
+-- Strong product identifiers. ALTER statements keep existing demo databases
+-- upgradeable because CREATE TABLE IF NOT EXISTS does not add new columns.
+alter table certified_products add column if not exists retailer text;
+alter table certified_products add column if not exists asin text;
+alter table certified_products add column if not exists gtin text;
+alter table certified_products add column if not exists model_number text;
+alter table certified_products add column if not exists sku text;
+
 -- Greener alternatives we can suggest (may overlap with certified_products).
 create table if not exists alternatives (
   id text primary key,
@@ -30,6 +38,21 @@ create table if not exists alternatives (
   emoji text default '🌿',
   created_at timestamptz default now()
 );
+
+alter table alternatives add column if not exists retailer text;
+alter table alternatives add column if not exists asin text;
+alter table alternatives add column if not exists gtin text;
+alter table alternatives add column if not exists model_number text;
+alter table alternatives add column if not exists sku text;
+
+create unique index if not exists certified_products_gtin
+  on certified_products (gtin) where gtin is not null;
+create unique index if not exists alternatives_gtin
+  on alternatives (gtin) where gtin is not null;
+create unique index if not exists certified_products_retailer_asin
+  on certified_products (retailer, asin) where asin is not null;
+create unique index if not exists alternatives_retailer_asin
+  on alternatives (retailer, asin) where asin is not null;
 
 create index if not exists alternatives_lookup
   on alternatives (category, eco_score desc, price asc);

@@ -24,6 +24,40 @@
     return match ? parseFloat(match[0]) : null;
   }
 
+  function productJsonLd() {
+    const candidates = [];
+    for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        const parsed = JSON.parse(script.textContent);
+        const visit = (value) => {
+          if (!value || typeof value !== "object") return;
+          if (Array.isArray(value)) return value.forEach(visit);
+          const types = Array.isArray(value["@type"]) ? value["@type"] : [value["@type"]];
+          if (types.some((type) => String(type).toLowerCase() === "product")) candidates.push(value);
+          if (value["@graph"]) visit(value["@graph"]);
+        };
+        visit(parsed);
+      } catch (_) {
+        // Retailers sometimes ship malformed analytics JSON beside valid JSON-LD.
+      }
+    }
+    return candidates[0] || {};
+  }
+
+  function amazonAsin() {
+    const input = document.querySelector("#ASIN")?.value;
+    const match = location.pathname.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})(?:[/?]|$)/i);
+    return (input || match?.[1] || "").trim().toUpperCase() || null;
+  }
+
+  function amazonModelNumber() {
+    for (const row of document.querySelectorAll("#productDetails_techSpec_section_1 tr, #productDetails_detailBullets_sections1 tr")) {
+      const label = row.querySelector("th")?.textContent.trim();
+      if (/^(item )?model number$/i.test(label || "")) return row.querySelector("td")?.textContent.trim() || null;
+    }
+    return null;
+  }
+
   // --- Mock storefront (served at http://localhost:8000/store) --------------
   // Markup here is ours, so the selectors are stable by construction.
   function scrapeMockStore() {
@@ -42,11 +76,17 @@
       image_url: root.querySelector("img")?.src || null,
       url: location.href,
       retailer: "mockstore",
+      asin: null,
+      gtin: root.dataset.gtin || null,
+      model_number: root.dataset.modelNumber || null,
+      sku: root.dataset.sku || null,
     };
   }
 
   // --- Amazon ---------------------------------------------------------------
   function scrapeAmazon() {
+    const structured = productJsonLd();
+    const structuredGtin = structured.gtin14 || structured.gtin13 || structured.gtin12 || structured.gtin8 || structured.gtin;
     const title = text(document, ["#productTitle", "#title span"]);
     if (!title) return null; // not a product detail page
 
@@ -76,6 +116,10 @@
       image_url: document.querySelector("#landingImage")?.src || null,
       url: location.href,
       retailer: "amazon",
+      asin: amazonAsin(),
+      gtin: structuredGtin ? String(structuredGtin) : null,
+      model_number: structured.mpn || structured.model || amazonModelNumber(),
+      sku: structured.sku || null,
     };
   }
 

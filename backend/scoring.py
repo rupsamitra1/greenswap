@@ -13,6 +13,14 @@ Provenance = Literal["certified", "manufacturer_documented", "retailer_documente
                      "label_extracted", "ai_inferred", "unknown"]
 PROVENANCE = {"certified", "manufacturer_documented", "retailer_documented",
               "label_extracted", "ai_inferred", "unknown"}
+PROVENANCE_RELIABILITY = {
+    "certified": 1.00,
+    "manufacturer_documented": .90,
+    "label_extracted": .85,
+    "retailer_documented": .65,
+    "ai_inferred": .35,
+    "unknown": 0.,
+}
 
 # Dimension: (maximum contribution, explicit assessment -> fraction earned).
 # Certifications support the relevant fact; they do not earn duplicate points.
@@ -63,6 +71,7 @@ class DimensionScore:
     assessment: str | None
     evidence_ids: tuple[str, ...]
     inferred: bool = False
+    evidence_confidence: int | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +86,8 @@ class Analysis:
     coverage_bounds: tuple[float, float]
     coverage_percent: int
     confidence: str
+    confidence_score: int
+    confidence_basis: str
     dimensions: tuple[DimensionScore, ...]
     evidence: tuple[Evidence, ...]
     warnings: tuple[str, ...]
@@ -90,7 +101,8 @@ def score_product(category: str, assessments: list[Assessment], evidence: list[E
 
     No affiliate, price, brand, or model-generated score is accepted here.
     Unassessed dimensions remain unknown. A point score requires full coverage.
-    Evidence confidence is deliberately qualitative until step 5 adds calibration.
+    Confidence measures evidence coverage and provenance. It does not claim that
+    this prototype rubric has been scientifically validated.
     """
     rubric_name = category if category in RUBRICS else "generic"
     rubric = RUBRICS[rubric_name]
@@ -120,16 +132,35 @@ def score_product(category: str, assessments: list[Assessment], evidence: list[E
     dimensions = []
     for name, (maximum, values) in rubric.items():
         item = by_dimension.get(name)
+        evidence_confidence = None
+        if item:
+            reliabilities = [PROVENANCE_RELIABILITY[by_id[ref].provenance] for ref in item.evidence_ids]
+            # The strongest direct source carries the fact. Independent supporting
+            # sources can add at most ten points; repetition cannot manufacture certainty.
+            support_bonus = min(.10, .05 * (len(set(item.evidence_ids)) - 1))
+            evidence_confidence = round(min(1., max(reliabilities) + support_bonus) * 100)
         dimensions.append(DimensionScore(
             name, round(maximum * values[item.value], 2) if item else None,
             maximum, item.value if item else None, item.evidence_ids if item else (),
             bool(item and any(by_id[ref].provenance == "ai_inferred" for ref in item.evidence_ids)),
+            evidence_confidence,
         ))
     known = sum(d.points or 0 for d in dimensions)
     coverage = sum(d.maximum for d in dimensions if d.points is not None)
     complete = coverage == 100
     warnings = [f"Missing assessment: {d.dimension}" for d in dimensions if d.points is None]
     inferred = any(d.inferred for d in dimensions)
+    confidence_score = round(sum(
+        (d.evidence_confidence or 0) * d.maximum / 100 for d in dimensions
+    ))
+    if rubric_name == "generic":
+        confidence_score = min(confidence_score, 50)
+    if confidence_score >= 80 and complete:
+        confidence = "high"
+    elif confidence_score >= 55 and complete:
+        confidence = "medium"
+    else:
+        confidence = "low"
     if inferred:
         warnings.append("Includes inferred facts; score is provisional")
     if rubric_name == "generic":
@@ -137,9 +168,10 @@ def score_product(category: str, assessments: list[Assessment], evidence: list[E
     warnings.append("Prototype rubric; not a safety certification or measured life-cycle footprint")
     return Analysis(
         METHOD_VERSION, category, rubric_name,
-        "provisional" if complete else "insufficient_evidence",
+        "ready" if complete and confidence != "low" else "provisional" if complete else "insufficient_evidence",
         int(known + .5) if complete else None,
         (round(known, 2), round(known + 100 - coverage, 2)), coverage,
-        "low" if inferred or not complete or rubric_name == "generic" else "uncalibrated",
+        confidence, confidence_score,
+        "Evidence coverage and source reliability; not statistical certainty",
         tuple(dimensions), tuple(evidence), tuple(warnings),
     )

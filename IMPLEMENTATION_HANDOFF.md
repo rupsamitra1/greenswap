@@ -17,8 +17,21 @@ Baseline commit: `171e84fa004d012efb33d0b19cd743a5b37f671b`
    - category-specific cleaning and bottle rubrics;
    - a conservative generic fallback;
    - validation preventing unsupported certification and evidence claims;
-   - method versioning for future cache invalidation.
-4. Added focused unit tests in `backend/tests/test_scoring.py`.
+   - method versioning for future cache invalidation;
+   - calculated confidence from coverage and source provenance.
+4. Added `backend/extraction.py`. It conservatively extracts normalized,
+   source-linked facts from listing text while retaining marketing claims as
+   unverified claims rather than evidence of performance.
+5. Added `backend/identification.py` with GTIN check-digit validation, Amazon
+   ASIN extraction, normalized model/SKU support, size/quantity variant
+   protection, deterministic identity keys, and fail-closed identity matching.
+6. Extended the scraper and backend request contract with `asin`, `gtin`,
+   `model_number`, and `sku`. Exact identifiers now take priority in cache keys.
+   The mock products carry stable model/SKU identifiers for repeatable demos.
+   Certified lookup also tries exact identifiers before its legacy title fallback.
+7. Added upgrade-safe identifier columns and GTIN indexes to the Supabase schema.
+8. Added focused unit tests across scoring, extraction, identity, and the
+   extension/backend product contract.
 
 ## Key decisions
 
@@ -31,31 +44,36 @@ Baseline commit: `171e84fa004d012efb33d0b19cd743a5b37f671b`
   scoring.
 - The current `/analyze` endpoint remains unchanged. This preserves the working
   extension while the new pipeline is built behind it.
-- `confidence: uncalibrated` is deliberate. Calibration belongs in step 5; the
-  prototype must not imply measured certainty before that work exists.
+- Confidence is a transparent rule based on evidence coverage and provenance.
+  It is explicitly described as evidence confidence rather than statistical
+  certainty or validation of the environmental rubric.
+- Title similarity is capped below an exact match. Conflicting GTINs, Amazon
+  ASINs, brands, model numbers, or package variants prevent confident matching.
+- Extraction records explicit facts. It does not yet convert those facts into
+  environmental assessments; that belongs with the ingredient/material work.
 
-## Continue with step 4
+## Continue with step 7
 
-Build fact extraction and normalization as a separate module. It should turn
-scraped listing fields into candidate evidence and assessments, while keeping
-inferred facts distinguishable from documented facts. Do not wire it into
-`/analyze` until fixture products can be scored end to end.
+Build ingredient and material evaluation on top of the normalized facts. Keep
+the local reference data small, explicit, and auditable for the demo. Avoid
+converting the presence of words such as "natural," "plastic," or "recyclable"
+directly into a safety conclusion.
 
 Suggested sequence:
 
-1. Add normalized product facts for ingredients/materials, packaging, product
-   format, concentration, and reuse.
-2. Add fixture evidence for the two mock-store products and every fallback
-   alternative.
-3. Score originals and alternatives through the same function.
-4. Add the structured result alongside legacy fields in `/analyze`.
-5. Compare responses with the legacy fixture, then update the extension UI in a
-   later step.
+1. Add an ingredient/material reference module with the scope and source for
+   every rule.
+2. Translate supported normalized facts into explicit rubric assessments.
+3. Add fixture evidence for the two mock-store products and every fallback
+   alternative, then score originals and alternatives through the same function.
+4. Version the cache with the identity, evidence fingerprint, and method version.
+5. Add the structured result alongside legacy fields in `/analyze` only after
+   the fixtures score end to end.
 
 Run the current scoring checks with:
 
 ```bash
-/opt/homebrew/bin/python3.12 -m unittest backend.tests.test_scoring -v
+/opt/homebrew/bin/python3.12 -m unittest discover -s backend/tests -v
 ```
 
 The system `python3` on the original development machine is Python 3.9; the

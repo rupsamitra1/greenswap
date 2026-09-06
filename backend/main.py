@@ -19,7 +19,6 @@ Run:
     uvicorn main:app --reload
 """
 
-import hashlib
 import json
 import os
 import re
@@ -31,6 +30,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+try:
+    # Supports both `uvicorn backend.main:app` from the repo root and the
+    # documented `uvicorn main:app` command from inside backend/.
+    from backend.identification import identify_product
+except ModuleNotFoundError:
+    from identification import identify_product
 
 def _ensure_env_file() -> None:
     """Create .env from .env.example on first run.
@@ -145,6 +151,10 @@ class Product(BaseModel):
     image_url: str | None = None
     url: str | None = None
     retailer: str | None = None
+    asin: str | None = None
+    gtin: str | None = None
+    model_number: str | None = None
+    sku: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -234,17 +244,38 @@ def guess_category(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Step 1: certified lookup (ground truth)
 # ---------------------------------------------------------------------------
-def lookup_certified(title: str):
-    """Check whether the product matches a row in certified_products."""
+def lookup_certified(product: Product):
+    """Check exact identifiers before falling back to the legacy title match."""
     if not supabase:
         return None
-    res = (
-        supabase.table("certified_products")
-        .select("*")
-        .ilike("name", f"%{title}%")
-        .limit(1)
-        .execute()
-    )
+    data = product.model_dump() if hasattr(product, "model_dump") else product.dict()
+    identity = identify_product(data)
+    exact_filters = []
+    if identity.gtin:
+        exact_filters.append({"gtin": identity.gtin})
+    if identity.asin and identity.retailer:
+        exact_filters.append({"retailer": identity.retailer, "asin": identity.asin})
+    if identity.brand and identity.model_number:
+        exact_filters.append({"brand": identity.brand, "model_number": identity.model_number})
+    if identity.retailer and identity.brand and identity.sku:
+        exact_filters.append({"retailer": identity.retailer, "brand": identity.brand, "sku": identity.sku})
+
+    for filters in exact_filters:
+        try:
+            query = supabase.table("certified_products").select("*")
+            for field, value in filters.items():
+                query = query.ilike(field, value) if field == "brand" else query.eq(field, value)
+            res = query.limit(1).execute()
+            if res.data:
+                return res.data[0]
+        except Exception as exc:
+            # An existing optional database may not have the new identifier
+            # columns until schema.sql is applied. Preserve the old demo path.
+            print(f"[GreenSwap] Exact certified lookup unavailable: {exc}")
+            break
+
+    res = (supabase.table("certified_products").select("*")
+           .ilike("name", f"%{product.title}%").limit(1).execute())
     return res.data[0] if res.data else None
 
 
@@ -252,11 +283,9 @@ def lookup_certified(title: str):
 # Step 2: the cache -- this is what keeps per-page LLM cost off the floor
 # ---------------------------------------------------------------------------
 def cache_key(product: Product) -> str:
-    """Normalize so trivial title differences still hit the same cache row."""
-    raw = f"{(product.brand or '').strip()} {product.title.strip()}".lower()
-    raw = re.sub(r"[^a-z0-9 ]+", "", raw)
-    raw = re.sub(r"\s+", " ", raw).strip()
-    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+    """Prefer exact identifiers, falling back to normalized brand + title."""
+    data = product.model_dump() if hasattr(product, "model_dump") else product.dict()
+    return identify_product(data).identity_key
 
 
 def cache_get(key: str):
@@ -536,7 +565,7 @@ def find_pricier(category: str, min_score: int, above_price: float):
 # ---------------------------------------------------------------------------
 @app.post("/analyze")
 def analyze(product: Product):
-    certified = lookup_certified(product.title)
+    certified = lookup_certified(product)
     cached = False
 
     if certified:
