@@ -1,0 +1,94 @@
+{
+  "captured_from_commit": "171e84fa004d012efb33d0b19cd743a5b37f671b",
+  "assumptions": {
+    "supabase_configured": false,
+    "azure_openai_configured": false,
+    "cache_cold": true
+  },
+  "responses": {
+    "soap": {
+      "original": {
+        "name": "Ultra Clean Dish Soap, 40oz",
+        "brand": "SudStar",
+        "price": 4.49,
+        "eco_score": 40,
+        "trust": "ai_estimated",
+        "certification": null,
+        "materials": ["unknown"],
+        "reason": "Scored cautiously from the product name alone — AI analysis is not configured, so materials could not be inferred."
+      },
+      "category": "cleaning",
+      "cached": false,
+      "price_known": true,
+      "pricier": [],
+      "alternatives": [
+        {
+          "id": "alt-leafclean",
+          "name": "Plant-Based Dish Soap, 40oz",
+          "brand": "LeafClean",
+          "price": 3.99,
+          "eco_score": 93,
+          "trust": "certified",
+          "certification": "EPA Safer Choice",
+          "reason": "Every ingredient appears on the EPA Safer Chemical Ingredients List.",
+          "emoji": "🌿",
+          "savings": 0.5
+        },
+        {
+          "id": "alt-barblock",
+          "name": "Solid Dish Soap Block, Plastic-Free",
+          "brand": "Sudsy Bar",
+          "price": 3.25,
+          "eco_score": 90,
+          "trust": "ai_estimated",
+          "certification": null,
+          "reason": "Solid format ships without a plastic bottle or added water.",
+          "emoji": "🧼",
+          "savings": 1.24
+        }
+      ]
+    },
+    "bottles": {
+      "original": {
+        "name": "Disposable Plastic Water Bottles, 24 Pack",
+        "brand": "HydroBasic",
+        "price": 12.99,
+        "eco_score": 40,
+        "trust": "ai_estimated",
+        "certification": null,
+        "materials": ["unknown"],
+        "reason": "Scored cautiously from the product name alone — AI analysis is not configured, so materials could not be inferred."
+      },
+      "category": "bottles",
+      "cached": false,
+      "price_known": true,
+      "pricier": [],
+      "alternatives": [
+        {
+          "id": "alt-eversip",
+          "name": "Stainless Steel Bottle, 24oz",
+          "brand": "EverSip",
+          "price": 9.99,
+          "eco_score": 91,
+          "trust": "certified",
+          "certification": "Climate Pledge Friendly",
+          "reason": "Reusable; replaces roughly 150 single-use bottles per year.",
+          "emoji": "🥤",
+          "savings": 3.0
+        },
+        {
+          "id": "alt-pureflow",
+          "name": "Glass Bottle with Protective Sleeve",
+          "brand": "PureFlow",
+          "price": 7.49,
+          "eco_score": 84,
+          "trust": "ai_estimated",
+          "certification": null,
+          "reason": "Reusable borosilicate glass, fully recyclable at end of life.",
+          "emoji": "🫙",
+          "savings": 5.5
+        }
+      ]
+    }
+  }
+}
