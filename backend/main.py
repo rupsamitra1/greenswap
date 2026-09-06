@@ -2,13 +2,10 @@
 GreenSwap backend (FastAPI).
 
 Pipeline for /analyze:
-1. Look the product up in certified_products (Supabase).
-   -> If found, trust = "certified" (ground truth from EPA Safer Choice / ENERGY STAR).
-2. If not found, check the ai_estimates cache before spending a single token.
-3. On a cache miss, ask Azure OpenAI to estimate materials + eco score,
-   then write the result back to the cache. trust = "ai_estimated".
-4. Return greener alternatives in the same category that cost NO MORE than
-   the original -- the "same price or cheaper" promise is a hard filter.
+1. Identify the exact product and separate documented facts from marketing.
+2. Score category dimensions from referenced evidence; unknowns stay unknown.
+3. Run every alternative through the exact same scoring method.
+4. Apply eligibility, price, and disclosed affiliate ranking after eco scoring.
 
 Everything degrades gracefully: with no Supabase and no Azure credentials the
 service still answers from a built-in catalog and a keyword heuristic, so the
@@ -23,6 +20,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -35,8 +33,18 @@ try:
     # Supports both `uvicorn backend.main:app` from the repo root and the
     # documented `uvicorn main:app` command from inside backend/.
     from backend.identification import identify_product
+    from backend.demo_catalog import alternatives as catalog_alternatives
+    from backend.evaluation import evaluate_product
+    from backend.pricing import price_basis
+    from backend.ranking import rank_candidates
+    from backend.scoring import METHOD_VERSION
 except ModuleNotFoundError:
     from identification import identify_product
+    from demo_catalog import alternatives as catalog_alternatives
+    from evaluation import evaluate_product
+    from pricing import price_basis
+    from ranking import rank_candidates
+    from scoring import METHOD_VERSION
 
 def _ensure_env_file() -> None:
     """Create .env from .env.example on first run.
@@ -113,9 +121,6 @@ REQUEST_TIMEOUT = float(_clean(os.getenv("AZURE_OPENAI_TIMEOUT")) or 20)
 # than silently degrading into the offline fallback.
 azure_status: dict = {"calls": 0, "failures": 0, "last_error": None, "json_mode": True}
 
-# An alternative must beat the original by this much to be worth suggesting.
-ECO_SCORE_MARGIN = 10
-
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     from supabase import create_client
@@ -160,69 +165,6 @@ class Product(BaseModel):
 # ---------------------------------------------------------------------------
 # Built-in catalog -- mirrors supabase/schema.sql so the demo runs with no DB.
 # ---------------------------------------------------------------------------
-FALLBACK_ALTERNATIVES = [
-    {
-        "id": "alt-leafclean",
-        "name": "Plant-Based Dish Soap, 40oz",
-        "brand": "LeafClean",
-        "category": "cleaning",
-        "price": 3.99,
-        "eco_score": 93,
-        "trust": "certified",
-        "certification": "EPA Safer Choice",
-        "reason": "Every ingredient appears on the EPA Safer Chemical Ingredients List.",
-        "emoji": "🌿",
-    },
-    {
-        "id": "alt-barblock",
-        "name": "Solid Dish Soap Block, Plastic-Free",
-        "brand": "Sudsy Bar",
-        "category": "cleaning",
-        "price": 3.25,
-        "eco_score": 90,
-        "trust": "ai_estimated",
-        "certification": None,
-        "reason": "Solid format ships without a plastic bottle or added water.",
-        "emoji": "🧼",
-    },
-    {
-        "id": "alt-refill",
-        "name": "Refillable Dish Soap Starter Kit",
-        "brand": "ReFill Co.",
-        "category": "cleaning",
-        "price": 5.25,
-        "eco_score": 88,
-        "trust": "ai_estimated",
-        "certification": None,
-        "reason": "Refill pouches cut plastic packaging by roughly 80%.",
-        "emoji": "♻️",
-    },
-    {
-        "id": "alt-eversip",
-        "name": "Stainless Steel Bottle, 24oz",
-        "brand": "EverSip",
-        "category": "bottles",
-        "price": 9.99,
-        "eco_score": 91,
-        "trust": "certified",
-        "certification": "Climate Pledge Friendly",
-        "reason": "Reusable; replaces roughly 150 single-use bottles per year.",
-        "emoji": "🥤",
-    },
-    {
-        "id": "alt-pureflow",
-        "name": "Glass Bottle with Protective Sleeve",
-        "brand": "PureFlow",
-        "category": "bottles",
-        "price": 7.49,
-        "eco_score": 84,
-        "trust": "ai_estimated",
-        "certification": None,
-        "reason": "Reusable borosilicate glass, fully recyclable at end of life.",
-        "emoji": "🫙",
-    },
-]
-
 # Keyword heuristic used when no LLM is reachable. Deliberately crude -- it
 # exists so the demo degrades to something honest rather than to an error.
 CATEGORY_KEYWORDS = {
@@ -282,10 +224,10 @@ def lookup_certified(product: Product):
 # ---------------------------------------------------------------------------
 # Step 2: the cache -- this is what keeps per-page LLM cost off the floor
 # ---------------------------------------------------------------------------
-def cache_key(product: Product) -> str:
-    """Prefer exact identifiers, falling back to normalized brand + title."""
+def cache_key(product: Product, evidence_fingerprint: str = "unversioned") -> str:
+    """Version identity-keyed estimates so methodology changes invalidate them."""
     data = product.model_dump() if hasattr(product, "model_dump") else product.dict()
-    return identify_product(data).identity_key
+    return f"{METHOD_VERSION}:{identify_product(data).identity_key}:{evidence_fingerprint[:16]}"
 
 
 def cache_get(key: str):
@@ -297,11 +239,17 @@ def cache_get(key: str):
             .limit(1)
             .execute()
         )
-        return res.data[0] if res.data else None
-    return _memory_cache.get(key)
+        row = res.data[0] if res.data else None
+    else:
+        row = _memory_cache.get(key)
+    if row and row.get("expires_at"):
+        expires = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+        if expires <= datetime.now(timezone.utc):
+            return None
+    return row
 
 
-def cache_put(key: str, product: Product, estimate: dict):
+def cache_put(key: str, product: Product, estimate: dict, evidence_fingerprint: str | None = None):
     row = {
         "query_hash": key,
         "query": product.title[:500],
@@ -309,10 +257,19 @@ def cache_put(key: str, product: Product, estimate: dict):
         "materials": estimate["materials"],
         "eco_score": estimate["eco_score"],
         "reason": estimate["reason"],
+        "method_version": METHOD_VERSION,
+        "model_version": AZURE_DEPLOYMENT if azure_client else "offline-heuristic",
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+        "evidence_fingerprint": evidence_fingerprint,
     }
     if supabase:
-        # upsert so concurrent shoppers viewing the same product cannot collide
-        supabase.table("ai_estimates").upsert(row, on_conflict="query_hash").execute()
+        try:
+            supabase.table("ai_estimates").upsert(row, on_conflict="query_hash").execute()
+        except Exception as exc:
+            # Existing demo databases remain usable until the migration is run.
+            print(f"[GreenSwap] Versioned cache columns unavailable: {exc}")
+            legacy = {k: row[k] for k in ("query_hash", "query", "category", "materials", "eco_score", "reason")}
+            supabase.table("ai_estimates").upsert(legacy, on_conflict="query_hash").execute()
     else:
         _memory_cache[key] = row
 
@@ -500,75 +457,28 @@ def estimate_with_ai(product: Product) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Step 4: greener alternatives, at or below the original price
-# ---------------------------------------------------------------------------
-def find_alternatives(category: str, min_score: int, max_price: float | None):
-    """Hard price ceiling: GreenSwap only ever suggests same-price-or-cheaper."""
-    if supabase:
-        q = (
-            supabase.table("alternatives")
-            .select("*")
-            .eq("category", category)
-            .gte("eco_score", min_score)
-        )
-        if max_price:
-            q = q.lte("price", max_price)
-        res = q.execute()
-        rows = res.data or []
-    else:
-        rows = [
-            a
-            for a in FALLBACK_ALTERNATIVES
-            if a["category"] == category
-            and a["eco_score"] >= min_score
-            and (max_price is None or a["price"] <= max_price)
-        ]
-
-    # Greenest first; when two are equally green, the cheaper one wins.
-    rows.sort(key=lambda a: (-a["eco_score"], a.get("price") or 0))
-    return rows[:3]
-
-
-def find_pricier(category: str, min_score: int, above_price: float):
-    """Greener options that cost MORE than the original.
-
-    Only ever used as an opt-in fallback when nothing qualifies at or below
-    the original price. Sorted by price ascending rather than eco score: once
-    we are asking the shopper to spend more, the amount extra is the thing
-    they are actually deciding on.
-    """
-    if supabase:
-        res = (
-            supabase.table("alternatives")
-            .select("*")
-            .eq("category", category)
-            .gte("eco_score", min_score)
-            .gt("price", above_price)
-            .execute()
-        )
-        rows = res.data or []
-    else:
-        rows = [
-            a
-            for a in FALLBACK_ALTERNATIVES
-            if a["category"] == category
-            and a["eco_score"] >= min_score
-            and (a["price"] or 0) > above_price
-        ]
-
-    rows.sort(key=lambda a: (a.get("price") or 0, -a["eco_score"]))
-    return rows[:3]
-
-
-# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.post("/analyze")
 def analyze(product: Product):
-    certified = lookup_certified(product)
+    product_data = product.model_dump() if hasattr(product, "model_dump") else product.dict()
+    structured = evaluate_product(product_data)
+    profile = structured["profile"]
+    certified = None if profile else lookup_certified(product)
     cached = False
 
-    if certified:
+    if profile:
+        analysis = structured["analysis"]
+        original = {
+            "id": profile["id"], "name": profile["name"], "brand": profile["brand"],
+            "price": product.price if product.price is not None else profile["price"],
+            "eco_score": analysis["overall_score"], "trust": "documented",
+            "certification": profile.get("certification"), "materials": [],
+            "reason": profile["reason"], "analysis": analysis,
+            "price_basis": price_basis(profile), "category": profile["category"],
+        }
+        category = profile["category"]
+    elif certified:
         original = {
             "name": certified["name"],
             "brand": certified.get("brand", ""),
@@ -578,16 +488,19 @@ def analyze(product: Product):
             "certification": certified.get("certification"),
             "materials": [],
             "reason": certified.get("reason", ""),
+            "analysis": structured["analysis"],
+            "price_basis": price_basis(product_data),
+            "category": certified["category"],
         }
         category = certified["category"]
     else:
-        key = cache_key(product)
+        key = cache_key(product, structured["evidence_fingerprint"])
         estimate = cache_get(key)
         if estimate:
             cached = True
         else:
             estimate = estimate_with_ai(product)
-            cache_put(key, product, estimate)
+            cache_put(key, product, estimate, structured["evidence_fingerprint"])
 
         original = {
             "name": product.title,
@@ -598,6 +511,9 @@ def analyze(product: Product):
             "certification": None,
             "materials": estimate.get("materials", []),
             "reason": estimate["reason"],
+            "analysis": structured["analysis"],
+            "price_basis": price_basis(product_data),
+            "category": estimate["category"],
         }
         category = estimate["category"]
 
@@ -606,63 +522,68 @@ def analyze(product: Product):
     # Say so explicitly rather than letting the promise lapse in silence.
     price_known = bool(original["price"])
 
-    alternatives = find_alternatives(
-        category=category,
-        min_score=original["eco_score"] + ECO_SCORE_MARGIN,
-        max_price=original["price"] if price_known else None,
-    )
+    evaluated_candidates = []
+    for item in catalog_alternatives(category):
+        if profile and item["id"] == profile["id"]:
+            continue
+        result = evaluate_product({"title": item["name"], "brand": item["brand"],
+                                   "sku": item["sku"], "model_number": item["model_number"]}, item)
+        evaluated_candidates.append({
+            "id": item["id"], "name": item["name"], "brand": item["brand"],
+            "category": item["category"], "price": item["price"],
+            "reason": item["reason"], "emoji": item["emoji"],
+            "affiliate": item["affiliate"], "purchase_url": item["purchase_url"],
+            "available": True,
+            "certification": item.get("certification"), "analysis": result["analysis"],
+            "price_basis": price_basis(item),
+        })
 
-    # Only when nothing qualifies at or below the price do we look higher, and
-    # even then the card keeps these behind an explicit opt-in. The default
-    # answer stays "same price or cheaper, or nothing at all".
-    pricier = (
-        find_pricier(
-            category=category,
-            min_score=original["eco_score"] + ECO_SCORE_MARGIN,
-            above_price=original["price"],
-        )
-        if price_known and not alternatives
-        else []
-    )
+    rank_input = {"category": category, "price": original["price"], "analysis": original["analysis"]}
+    ranking = rank_candidates(rank_input, evaluated_candidates, price_ceiling=price_known)
+    alternatives = ranking["candidates"][:3]
+    pricier = []
+    if price_known and not alternatives:
+        unrestricted = rank_candidates(rank_input, evaluated_candidates, price_ceiling=False)
+        pricier = [item for item in unrestricted["candidates"] if item["price"] > original["price"]][:3]
+
+    def public_candidate(a, dearer=False):
+        score = a["analysis"]["overall_score"]
+        result = {
+            "id": a["id"], "name": a["name"], "brand": a.get("brand", ""),
+            "price": a.get("price", 0), "eco_score": score, "trust": "documented",
+            "certification": a.get("certification"), "reason": a.get("reason", ""),
+            "emoji": a.get("emoji", "🌿"), "analysis": a["analysis"],
+            "price_basis": a["price_basis"], "purchase_url": a.get("purchase_url"),
+            "affiliate": bool(a.get("affiliate")), "affiliate_boost": a.get("affiliate_boost", 0),
+            "affiliate_influenced_order": bool(a.get("affiliate_influenced_order")),
+            "ranking_explanation": a.get("ranking_explanation", ""),
+        }
+        if dearer:
+            result["extra_cost"] = round(a["price"] - original["price"], 2)
+        else:
+            result["savings"] = round(original["price"] - a["price"], 2) if price_known else None
+        return result
 
     return {
         "original": original,
         "category": category,
         "cached": cached,
         "price_known": price_known,
-        "pricier": [
-            {
-                "id": a["id"],
-                "name": a["name"],
-                "brand": a.get("brand", ""),
-                "price": a.get("price", 0),
-                "eco_score": a["eco_score"],
-                "trust": a.get("trust", "ai_estimated"),
-                "certification": a.get("certification"),
-                "reason": a.get("reason", ""),
-                "extra_cost": round((a.get("price") or 0) - original["price"], 2),
-            }
-            for a in pricier
+        "identity": structured["identity"],
+        "analysis": original["analysis"],
+        "evidence_fingerprint": structured["evidence_fingerprint"],
+        "method_version": structured["method_version"],
+        "extraction": structured["extraction"],
+        "analysis_steps": [
+            {"label": "Identify", "detail": structured["identity"]["identity_strength"] + " product match"},
+            {"label": "Extract", "detail": "documented facts separated from marketing claims"},
+            {"label": "Score", "detail": f"{original['analysis']['coverage_percent']}% rubric coverage"},
+            {"label": "Compare", "detail": f"{len(evaluated_candidates)} products run through the same rubric"},
         ],
-        "alternatives": [
-            {
-                "id": a["id"],
-                "name": a["name"],
-                "brand": a.get("brand", ""),
-                "price": a.get("price", 0),
-                "eco_score": a["eco_score"],
-                "trust": a.get("trust", "ai_estimated"),
-                "certification": a.get("certification"),
-                "reason": a.get("reason", ""),
-                "emoji": a.get("emoji", "🌿"),
-                "savings": (
-                    round(original["price"] - (a.get("price") or 0), 2)
-                    if price_known
-                    else None
-                ),
-            }
-            for a in alternatives
-        ],
+        "ranking": {k: v for k, v in ranking.items() if k != "candidates"},
+        "keep_current": ranking["keep_current"],
+        "pricier": [public_candidate(a, True) for a in pricier],
+        "alternatives": [public_candidate(a) for a in alternatives],
     }
 
 

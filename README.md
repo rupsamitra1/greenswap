@@ -1,125 +1,92 @@
 # GreenSwap
 
-A browser extension that shows a **verified greener alternative — at the same price or cheaper** — directly on the product page, at the moment the shopper is deciding what to buy.
+GreenSwap is a Chrome extension prototype that explains a product's environmental score and suggests a meaningfully better option at the same sticker price or less.
 
 Built for the C2S Tech NextGen Internship 2026 (Group 4).
 
----
+## What the demo proves
 
-## How it works
+The `/analyze` pipeline is deterministic and inspectable:
 
-```
-product page ──▶ content script scrapes title, price, brand, bullets
-                          │
-                          ▼
-                 service worker ──▶ POST /analyze
-                                        │
-              ┌─────────────────────────┼─────────────────────────┐
-              ▼                         ▼                         ▼
-     1. certified lookup        2. estimate cache          3. Azure OpenAI
-        (EPA Safer Choice,         (skip the model            (infer materials
-         ENERGY STAR)               entirely on a hit)         when unlisted)
-              │                         │                         │
-              └─────────────────────────┴─────────────────────────┘
-                          │
-                          ▼
-              4. alternatives in the same category,
-                 eco_score higher, price ≤ original
-                          │
-                          ▼
-                 card injected on the page
-```
+1. **Identify** — prefer GTIN/ASIN/model/SKU over title similarity and protect size variants.
+2. **Extract** — retain source-linked facts, while words such as “natural” and “eco-friendly” remain unverified marketing claims.
+3. **Assess** — translate only supported facts into category-specific dimensions. Unknown data stays unknown; it never becomes an average score.
+4. **Score** — total ingredient/material impact, environmental fate or reuse, packaging, and concentration/end-of-life. A point score requires full rubric coverage.
+5. **Compare** — analyze the viewed item and every alternative with the same rubric and version.
+6. **Qualify** — require adequate evidence confidence, the same category, and at least a 10-point environmental improvement.
+7. **Rank** — enforce the current sticker price as the default ceiling, then consider value and availability.
 
-Three design decisions carry the product:
+The UI exposes the completed stages, dimension points, evidence confidence, missing-data warnings, sticker and per-use pricing, and the scoring method version. This is a screening prototype—not a product-safety certification or a measured life-cycle assessment.
 
-**Certified before estimated.** The database is consulted first, and the model runs only when a product has no published materials. Every result the user sees is labeled `✓ Verified` or `~ AI estimated`, so nobody has to take an opaque eco-score on faith. This is the answer to the 55% of consumers who distrust sustainability claims.
+## Affiliate policy in the demo
 
-**Price is a ceiling by default, and only the shopper can lift it.** `find_alternatives` never returns anything costing more than the original. When nothing qualifies, `find_pricier` offers greener-but-dearer options — but the card keeps them behind an explicit "show N that cost more" button, so a pricier suggestion is always something the shopper asked for. The unprompted answer stays "same price or cheaper, or nothing at all."
+Environmental scores never include affiliate status, price, brand, or commission rate.
 
-When the price cannot be scraped at all, the ceiling cannot be enforced, so the card says so plainly rather than letting the promise lapse in silence.
+After a product qualifies environmentally, an affiliate product may receive at most a **3-point recommendation boost**, and only when it is within **4 environmental points** of the best qualified option. The raw environmental score remains visible and unchanged. If this rule changes the order, the UI says so. Partner links are labeled, and commission percentage is never a ranking input.
 
-**Estimates are cached across users.** Running a model on every product page every shopper opens is the cost problem flagged in the Week 4 reflection. Estimates are keyed by a normalized hash of brand + title in `ai_estimates`, so the hundredth shopper to view a product pays nothing.
+The soap page deliberately demonstrates this: the non-partner option scores 85 and the partner option scores 84; the disclosed 3-point ranking preference places the partner first. A five-point environmental gap cannot be crossed by the affiliate rule.
 
----
+## Run locally
 
-## Setup
-
-### 1. Backend
+Requires Python 3.10 or newer.
 
 ```bash
-cd backend && pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/pip install -r backend/requirements.txt
+.venv/bin/python -m uvicorn backend.main:app --reload --port 8000
 ```
 
-### Adding the Azure key
+Then:
 
-`backend/.env` already exists with the fields laid out. Paste three values in and restart:
+1. Open `chrome://extensions`.
+2. Enable Developer mode.
+3. Choose **Load unpacked** and select `extension/`.
+4. Open <http://localhost:8000/store/>.
 
-    AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-    AZURE_OPENAI_API_KEY=<the long key string>
-    AZURE_OPENAI_DEPLOYMENT=<your deployment name>
+The three reliable demo stories are:
 
-`AZURE_OPENAI_DEPLOYMENT` is the **deployment name you chose in Azure AI Foundry**, not the model name. That mismatch is the single most common failure, and it surfaces as a 404.
+- **Ultra Clean Dish Soap** — a 50-point product with two cheaper, documented swaps and a visible affiliate-equivalence example.
+- **Disposable Plastic Water Bottles** — a 10-point single-use product compared with durable reusable options.
+- **BetterDrop Refill** — a 100-point product that produces an honest “keep this one” result.
 
-The server reads `.env` once at startup, so **restart it after editing**.
+All demo brands, profiles, certifications, use counts, and purchase destinations are fictional fixtures. `example.com` purchase links demonstrate affiliate behavior without representing a commercial relationship.
 
-Then confirm it actually works:
+Run verification:
 
 ```bash
-curl http://localhost:8000/selftest
+.venv/bin/python -m unittest discover -s backend/tests -v
+node --check extension/content.js
+node --check extension/scrapers.js
 ```
 
-That makes one real model call and reports the outcome. `"ok": true` comes back with the model's scoring of a sample product. `"ok": false` comes back with the actual error and a hint naming the likely cause. This endpoint exists because every failure path in `/analyze` degrades gracefully into the offline estimator — which is right for shoppers, and useless when you are trying to find out whether your key works. `/health` also reports `azure_calls`, `azure_failures`, and `azure_last_error`.
+## Optional services
 
-`.env` is gitignored. Never commit it.
+The demo is fully functional without Azure OpenAI or Supabase. Copy `backend/.env.example` to `backend/.env` to configure them. `/health` reports configuration state, and `/selftest` performs one uncached model call for setup diagnostics.
 
-Supabase is optional. With `SUPABASE_URL` blank, the backend serves a built-in demo catalog and caches estimates in memory, which is enough to run the whole demo offline.
+Cached estimates are keyed by product identity, evidence fingerprint, and scoring method version; rows also record model version and expire after 30 days. Apply `supabase/schema.sql` to add the current fields to an existing database.
 
-```bash
-cd backend
-python -m uvicorn main:app --reload --port 8000
+## Project map
+
+```text
+extension/              Chrome MV3 extension and explanation UI
+backend/main.py         FastAPI endpoint and graceful external-service fallback
+backend/scoring.py      deterministic category rubrics
+backend/extraction.py   conservative listing fact extraction
+backend/identification.py exact identity and variant matching
+backend/reference_data.py auditable material/ingredient question flags
+backend/evaluation.py   shared original/alternative evaluation path
+backend/pricing.py      sticker, unit, and estimated per-use comparison
+backend/ranking.py      environmental eligibility and separate affiliate policy
+backend/demo_catalog.py fictional, internally consistent demo evidence
+store/                  three-page local demo retailer
+supabase/schema.sql     optional database schema and migration
 ```
 
-Use `python -m uvicorn`, not the bare `uvicorn` command: pip installs it into a `Scripts` directory that is not on `PATH` by default on Windows. Note also that Windows PowerShell 5.1 has no `&&` operator — chain with `;` or run the two lines separately.
+## Important limits
 
-Check it came up: <http://localhost:8000/health> reports whether Supabase and Azure OpenAI are actually wired in.
-
-### 2. Database (optional)
-
-Paste `supabase/schema.sql` into the Supabase SQL editor. It creates the three tables, the RLS policies, and the demo seed rows.
-
-Note the RLS behavior: with row-level security on and no `select` policy, queries return **empty results silently** instead of erroring. If alternatives stop appearing, check the policies before you check the code.
-
-### 3. Extension
-
-1. Open `chrome://extensions`
-2. Turn on **Developer mode**
-3. **Load unpacked** → select the `extension/` folder
-
-### 4. Demo
-
-With the backend running, open <http://localhost:8000/store/> and click a product. The card appears under the Add to Cart button.
-
-The same extension also runs on `https://www.amazon.com/*` product pages. Amazon's markup changes often, so the scraper tries several selectors per field and the card falls back to a floating position when the buy box cannot be found — but the mock storefront is the reliable surface to demo on.
-
----
-
-## Layout
-
-```
-extension/     Chrome MV3 extension
-  manifest.json
-  scrapers.js    per-retailer page scrapers
-  content.js     shadow-DOM card, injection, fallback placement
-  background.js  service worker; all backend traffic routes through here
-backend/       FastAPI service (also serves the mock storefront)
-  main.py
-store/         mock retailer used for demos
-supabase/      schema, RLS policies, seed data
-```
-
-## Current limits
-
-- The alternatives catalog is a small seeded set, not a live retailer feed. Real coverage needs a product data API.
-- Material inference from images is not implemented; the model currently reads the title and bullet text only.
-- Only Amazon has a real scraper. Walmart and Target are named in the deliverables and are not built.
-- No affiliate link wrapping yet, so the primary revenue path is not exercised.
+- The rubric is a transparent product decision for a demo, not a peer-reviewed LCA methodology.
+- Real ingredient conclusions require authoritative hazard/fate datasets and exact chemical identity; “synthetic,” “natural,” or a material name is not itself a verdict.
+- Durable-product break-even depends on actual reuse count, washing, manufacturing, transport, and local disposal. The demo shows estimated uses but does not claim a universal break-even point.
+- The curated catalog is intentionally small. Live Supabase alternative rows still need structured evidence records before they should enter this score-based ranking pipeline.
+- Amazon selectors can change, and no Walmart or Target scraper is implemented.
+- Affiliate destinations are placeholders; real programs need network approval, tracking parameters, conversion reporting, and periodic link validation.

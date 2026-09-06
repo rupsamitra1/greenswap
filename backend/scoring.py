@@ -1,4 +1,4 @@
-"""Experimental, deterministic scoring contract. Not yet wired into /analyze.
+"""Deterministic, evidence-backed environmental scoring contract.
 
 Inputs must be assessed facts with evidence references, never raw marketing copy.
 Weights are prototype policy choices, not a validated life-cycle assessment.
@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Literal
 
-METHOD_VERSION = "prototype-1"
+METHOD_VERSION = "prototype-2"
 Provenance = Literal["certified", "manufacturer_documented", "retailer_documented",
                      "label_extracted", "ai_inferred", "unknown"]
 PROVENANCE = {"certified", "manufacturer_documented", "retailer_documented",
@@ -26,8 +26,8 @@ PROVENANCE_RELIABILITY = {
 # Certifications support the relevant fact; they do not earn duplicate points.
 RUBRICS = {
     "cleaning": {
-        "ingredient_safety": (30, {"lower_concern_assessed": 1., "mixed_concern": .5, "high_concern": 0.}),
-        "environmental_fate": (30, {"lower_concern_assessed": 1., "mixed_concern": .5, "high_concern": 0.}),
+        "ingredient_safety": (30, {"lower_concern_assessed": 1., "documented_low_concern": .9, "mixed_concern": .5, "high_concern": 0.}),
+        "environmental_fate": (30, {"lower_concern_assessed": 1., "documented_low_concern": .9, "mixed_concern": .5, "high_concern": 0.}),
         "packaging": (25, {"minimal_refill": 1., "reduced_packaging": .7, "single_use": .2, "excessive": 0.}),
         "concentration": (15, {"documented_concentrate": 1., "ready_to_use": .4}),
     },

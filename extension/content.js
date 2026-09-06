@@ -183,6 +183,8 @@
       background: transparent; color: var(--gs-muted);
       border: 1px solid var(--gs-line);
     }
+    .badge.documented { background: #e4ede7; color: var(--gs-green-deep); border: 1px solid #bfd0c4; }
+    .partner { display:inline-block; padding:3px 8px; border-radius:999px; background:#fff2cc; color:#694f00; font-size:11px; font-weight:700; }
 
     /* --- section heading ------------------------------------------------ */
     .section {
@@ -274,6 +276,24 @@
     .reveal:focus-visible { outline: 2px solid var(--gs-green); outline-offset: 2px; }
     .pricier[hidden] { display: none; }
 
+    .pipeline { display:grid; grid-template-columns:repeat(4,1fr); gap:5px; padding:12px 16px 4px; }
+    .step { border:1px solid var(--gs-line); border-radius:8px; padding:7px 4px; text-align:center; font-size:10px; color:var(--gs-muted); background:var(--gs-card); }
+    .step::before { content:"✓"; display:block; color:var(--gs-green); font-weight:800; font-size:14px; }
+    .step strong { display:block; color:var(--gs-ink); font-size:10.5px; }
+    .explain { margin:8px 16px 4px; border:1px solid var(--gs-line); border-radius:9px; background:var(--gs-card); }
+    .explain summary { cursor:pointer; padding:10px 12px; color:var(--gs-green-deep); font-weight:700; }
+    .explain-body { padding:0 12px 11px; font-size:12px; color:var(--gs-muted); }
+    .dimension { display:grid; grid-template-columns:1fr auto; gap:8px; padding:5px 0; border-top:1px solid #ece8dc; }
+    .dimension strong { color:var(--gs-ink); }
+    .confidence { margin:8px 0; padding:7px 8px; border-radius:7px; background:#edf3ee; color:var(--gs-green-deep); }
+    .warning { color:#79531c; margin-top:5px; }
+    .evidence { margin-top:8px; padding-top:7px; border-top:1px solid #ece8dc; }
+    .evidence div { margin-top:4px; }
+    .unit { color:var(--gs-muted); font-size:10.5px; margin-top:3px; white-space:nowrap; }
+    .shop { display:inline-block; margin-top:8px; color:var(--gs-green); font-size:12px; font-weight:700; text-decoration:underline; }
+    .disclosure { margin:7px 16px 12px; font-size:11px; line-height:1.4; color:var(--gs-muted); }
+    .keep { margin:0 16px 12px; padding:12px; background:#e4ede7; color:var(--gs-green-deep); border-radius:9px; font-weight:650; }
+
     @media (max-width: 480px) {
       .panel { width: calc(100vw - 40px); }
       .verdict-score { font-size: 38px; }
@@ -296,7 +316,9 @@
     const label =
       trust === "certified"
         ? `✓ ${certification || "Certified"}`
-        : "~ AI estimate";
+        : trust === "documented"
+          ? `✓ ${certification || "Documented"}`
+          : "~ AI estimate";
     return `<span class="badge ${trust}">${escapeHtml(label)}</span>`;
   }
 
@@ -312,10 +334,16 @@
     } else {
       pill = `<span class="save neutral">Same price</span>`;
     }
+    const basis = alt.price_basis || {};
+    const unit = basis.price_per_use != null
+      ? `$${Number(basis.price_per_use).toFixed(3)}/use*`
+      : basis.price_per_unit != null && basis.unit
+        ? `$${Number(basis.price_per_unit).toFixed(2)}/${escapeHtml(basis.unit)}` : "";
     return `
       <div class="row-price">
         <div class="amount">$${Number(alt.price).toFixed(2)}</div>
         ${pill}
+        ${unit ? `<div class="unit">${unit}</div>` : ""}
       </div>`;
   }
 
@@ -330,7 +358,9 @@
           <div class="row-meta">
             <span class="eco">Eco ${alt.eco_score}</span>
             ${badge(alt.trust, alt.certification)}
+            ${alt.affiliate ? `<span class="partner">Partner link</span>` : ""}
           </div>
+          ${alt.purchase_url ? `<a class="shop" href="${escapeHtml(alt.purchase_url)}" target="_blank" rel="noopener noreferrer">View product ↗</a>` : ""}
         </div>
         ${priceCell(alt)}
       </div>`;
@@ -352,9 +382,10 @@
           Show ${pricier.length} that cost more
         </button>
         <div class="pricier rows" hidden>${pricier.map(renderRow).join("")}</div>`;
+    } else if (data.keep_current) {
+      body = `<div class="keep">Keep this one. We found no sufficiently better option at this price.</div>`;
     } else {
-      body = `<div class="empty">No greener option at or below this price yet.
-                We never suggest an alternative that costs more.</div>`;
+      body = `<div class="empty">We do not have enough comparable evidence to recommend a swap yet.</div>`;
     }
 
     // Showing the current price alongside makes the comparison concrete
@@ -367,6 +398,21 @@
            </div>`
         : "";
 
+    const analysis = data.analysis || original.analysis || {};
+    const dimensions = (analysis.dimensions || []).map((dimension) => `
+      <div class="dimension">
+        <span><strong>${escapeHtml(dimension.dimension.replaceAll("_", " "))}</strong><br>${escapeHtml(dimension.assessment || "Unknown — no points assumed")}</span>
+        <span>${dimension.points == null ? "?" : dimension.points}/${dimension.maximum}</span>
+      </div>`).join("");
+    const warnings = (analysis.warnings || []).slice(0, 3).map((w) => `<div class="warning">• ${escapeHtml(w)}</div>`).join("");
+    const evidence = (analysis.evidence || []).slice(0, 4).map((item) => `<div>• ${escapeHtml(item.claim)} <em>(${escapeHtml(item.source)})</em></div>`).join("");
+    // Legacy responses still carry an AI estimate, but the visible score obeys
+    // the structured contract: incomplete evidence is shown as unknown.
+    const scoreDisplay = analysis.overall_score == null ? "—" : analysis.overall_score;
+    const pipeline = (data.analysis_steps || []).map((step) => `<div class="step"><strong>${escapeHtml(step.label)}</strong>${escapeHtml(step.detail)}</div>`).join("");
+    const affiliateDisclosure = [...alternatives, ...pricier].some((a) => a.affiliate)
+      ? `<div class="disclosure"><strong>Affiliate disclosure:</strong> GreenSwap may earn from partner links. Eco scores never receive partner points.${data.ranking?.affiliate_influenced ? " A maximum 3-point partner preference changed the order only inside the disclosed 4-point environmental equivalence band." : " Partner status did not change this ordering."} *Per-use values are estimates.</div>` : "";
+
     return `
       <div class="head">
         ${LOGO()}
@@ -375,13 +421,25 @@
       </div>
 
       <div class="verdict">
-        <div class="verdict-score">${original.eco_score}<span>/100</span></div>
+        <div class="verdict-score">${scoreDisplay}<span>/100</span></div>
         <div>
           <div class="verdict-label">This item</div>
           <div class="verdict-reason">${escapeHtml(original.reason)}</div>
           ${badge(original.trust, original.certification)}
         </div>
       </div>
+
+      <div class="pipeline">${pipeline}</div>
+      <details class="explain">
+        <summary>Why this score?</summary>
+        <div class="explain-body">
+          <div class="confidence">${escapeHtml(analysis.confidence || "low")} evidence confidence · ${analysis.confidence_score ?? 0}/100 · ${analysis.coverage_percent ?? 0}% coverage</div>
+          ${dimensions}
+          ${evidence ? `<div class="evidence"><strong>Evidence used</strong>${evidence}</div>` : ""}
+          ${warnings}
+          <div class="warning">Method ${escapeHtml(data.method_version || "prototype")}; this is a screening tool, not a safety certification or full life-cycle assessment.</div>
+        </div>
+      </details>
 
       <div class="section">${
         data.price_known === false
@@ -394,7 +452,8 @@
                haven't been checked against it and may cost more.</div>`
           : baseline
       }
-      ${body}`;
+      ${body}
+      ${affiliateDisclosure}`;
   }
 
   function mount(data) {

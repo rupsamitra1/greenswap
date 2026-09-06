@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "GreenSwap",
-  "version": "0.7.0",
-  "description": "Shows a verified greener alternative -- same price or cheaper -- right on the product page.",
+  "version": "0.8.0",
+  "description": "Explains evidence-backed environmental scores and suggests meaningfully better options at the same price or cheaper.",
   "permissions": [
     "storage"
   ],

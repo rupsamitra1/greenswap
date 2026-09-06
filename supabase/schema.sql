@@ -72,6 +72,13 @@ create table if not exists ai_estimates (
   created_at timestamptz default now()
 );
 
+-- Cache validity belongs to the scoring/model version and expires so changed
+-- evidence does not leave a stale conclusion indefinitely.
+alter table ai_estimates add column if not exists method_version text;
+alter table ai_estimates add column if not exists model_version text;
+alter table ai_estimates add column if not exists evidence_fingerprint text;
+alter table ai_estimates add column if not exists expires_at timestamptz;
+
 -- RLS: enable, then allow public read on the catalog tables.
 -- Without policies, queries return EMPTY results silently rather than erroring.
 alter table certified_products enable row level security;
@@ -86,7 +93,8 @@ create policy "public read alternatives" on alternatives
 -- ai_estimates is written by the backend with the service key, which bypasses
 -- RLS. No public policy is granted, so the cache is not readable from clients.
 
--- Seed data for the demo (mirrors FALLBACK_ALTERNATIVES in backend/main.py).
+-- Legacy seed data. The offline demo now uses backend/demo_catalog.py so its
+-- evidence and assessments can be versioned and audited with the source code.
 insert into alternatives (id, name, brand, category, price, eco_score, trust, certification, reason, emoji) values
   ('alt-leafclean', 'Plant-Based Dish Soap, 40oz', 'LeafClean', 'cleaning', 3.99, 93, 'certified', 'EPA Safer Choice', 'Every ingredient appears on the EPA Safer Chemical Ingredients List.', '🌿'),
   ('alt-barblock', 'Solid Dish Soap Block, Plastic-Free', 'Sudsy Bar', 'cleaning', 3.25, 90, 'ai_estimated', null, 'Solid format ships without a plastic bottle or added water.', '🧼'),
