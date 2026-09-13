@@ -253,7 +253,9 @@
     a.row-name { text-decoration: none; }
     a.row-name:hover { text-decoration: underline; }
     a.row-name:focus-visible { outline: 2px solid var(--gs-green); outline-offset: 2px; }
-    .row-go {
+    .row-go,
+    .row-go:link,
+    .row-go:visited {
       display: inline-block; margin-top: 8px;
       padding: 6px 12px; border-radius: 999px;
       background: var(--gs-green); color: #fff;
@@ -330,7 +332,7 @@
     .evidence { margin-top:8px; padding-top:7px; border-top:1px solid #ece8dc; }
     .evidence div { margin-top:4px; }
     .unit { color:var(--gs-muted); font-size:10.5px; margin-top:3px; white-space:nowrap; }
-    .shop { display:inline-block; margin-top:8px; color:var(--gs-green); font-size:12px; font-weight:700; text-decoration:underline; }
+    .row-go.shop { color:#fff; text-decoration:none; }
     .disclosure { margin:7px 16px 12px; font-size:11px; line-height:1.4; color:var(--gs-muted); }
     .keep { margin:0 16px 12px; padding:12px; background:#e4ede7; color:var(--gs-green-deep); border-radius:9px; font-weight:650; }
 
