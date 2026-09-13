@@ -32,6 +32,8 @@ from pathlib import Path
 
 import agent as agent_mod
 import heuristics
+import identification
+import pricing
 import product_search
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -452,7 +454,26 @@ def lookup_certified(title: str):
 # Step 2: the cache -- this is what keeps per-page LLM cost off the floor
 # ---------------------------------------------------------------------------
 def cache_key(product: Product) -> str:
-    """Normalize so trivial title differences still hit the same cache row."""
+    """Normalize so trivial title differences still hit the same cache row.
+
+    Identity comes from identification.py where it can: an ASIN or a GTIN is
+    exact, and its notion of a size variant stops a 12oz and a 40oz of the same
+    product sharing one cached verdict.
+    """
+    try:
+        identity = identification.identify_product({
+            "title": product.title,
+            "brand": product.brand,
+            "url": product.url,
+        })
+        # An ASIN is exact; otherwise identity_key folds in brand, title and
+        # the variant tokens that keep a 12oz and a 40oz apart.
+        key = identity.asin or identity.identity_key
+        if key:
+            return hashlib.sha256(str(key).encode()).hexdigest()[:32]
+    except Exception:
+        pass  # fall back to the normalized title hash below
+
     raw = f"{(product.brand or '').strip()} {product.title.strip()}".lower()
     raw = re.sub(r"[^a-z0-9 ]+", "", raw)
     raw = re.sub(r"\s+", " ", raw).strip()
@@ -803,6 +824,20 @@ def find_pricier(category: str, min_score: int, above_price: float):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+def with_price_basis(row: dict) -> dict:
+    """Attach sticker/unit pricing.
+
+    Comparing $12.99 against $9.99 says nothing when one is 100 cups and the
+    other is 25. This is what makes "cheaper" mean cheaper.
+    """
+    basis = pricing.price_basis(row)
+    if basis.get("price_per_unit") and basis.get("unit"):
+        row["unit_price"] = basis["price_per_unit"]
+        row["unit_label"] = basis["unit"]
+        row["unit_quantity"] = basis["quantity"]
+    return row
+
+
 def buy_url(row: dict, retailer: str | None = None) -> str:
     """A link the shopper can actually act on.
 
@@ -1022,6 +1057,8 @@ def analyze(product: Product):
                 "trust": a.get("trust", "ai_estimated"),
                 "certification": a.get("certification"),
                 "reason": a.get("reason", ""),
+                **{k: v for k, v in with_price_basis(dict(a)).items()
+                   if k in ("unit_price", "unit_label", "unit_quantity")},
                 "url": buy_url(a, product.retailer),
                 "extra_cost": round((a.get("price") or 0) - original["price"], 2),
             }
@@ -1038,6 +1075,8 @@ def analyze(product: Product):
                 "certification": a.get("certification"),
                 "reason": a.get("reason", ""),
                 "emoji": a.get("emoji", "🌿"),
+                **{k: v for k, v in with_price_basis(dict(a)).items()
+                   if k in ("unit_price", "unit_label", "unit_quantity")},
                 "url": buy_url(a, product.retailer),
                 "savings": (
                     round(original["price"] - (a.get("price") or 0), 2)

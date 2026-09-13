@@ -283,6 +283,10 @@
       background: var(--gs-green); color: #fff;
       font-size: 11px; font-weight: 700; white-space: nowrap;
     }
+    .unit {
+      margin-top: 3px; font-size: 11px; color: var(--gs-muted);
+      font-variant-numeric: tabular-nums;
+    }
     .save.neutral { background: #e4ede7; color: var(--gs-green-deep); }
     .save.more { background: #f0e6d8; color: #7a5320; }
 
@@ -349,9 +353,16 @@
     } else {
       pill = `<span class="save neutral">Same price</span>`;
     }
+    // A sticker price alone is misleading when pack sizes differ: $9.99 for 25
+    // is dearer than $12.99 for 100. Show the per-unit figure when we have it.
+    const unit =
+      alt.unit_price && alt.unit_label
+        ? `<div class="unit">$${Number(alt.unit_price).toFixed(2)}/${escapeHtml(alt.unit_label)}</div>`
+        : "";
     return `
       <div class="row-price">
         <div class="amount">$${Number(alt.price).toFixed(2)}</div>
+        ${unit}
         ${pill}
       </div>`;
   }
