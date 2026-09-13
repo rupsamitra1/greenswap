@@ -1027,6 +1027,8 @@ def analyze(product: Product):
             continue
         if pick["eco_score"] < min_score:
             continue
+        if not heuristics.same_product_type(product.title, pick["name"]):
+            continue  # right idea, wrong kind of product
         live_picks.append(pick)
 
     # Whenever the agent did not choose for us -- it is switched off, the model
@@ -1035,7 +1037,8 @@ def analyze(product: Product):
     # at all, since the catalog is rightly excluded there.
     if not live_picks and product.listings:
         live_picks = heuristics.rank_listings(
-            [l.model_dump() for l in product.listings],
+            [l.model_dump() for l in product.listings
+             if heuristics.same_product_type(product.title, l.name)],
             min_score=min_score,
             max_price=original["price"] if price_known else None,
         )
@@ -1095,7 +1098,8 @@ def analyze(product: Product):
 
         # Dearer options come from the same real listings.
         dearer = heuristics.rank_listings(
-            [l.model_dump() for l in product.listings],
+            [l.model_dump() for l in product.listings
+             if heuristics.same_product_type(product.title, l.name)],
             min_score=min_score,
             max_price=None,
             limit=8,

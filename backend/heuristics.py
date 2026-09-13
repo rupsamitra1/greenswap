@@ -129,6 +129,40 @@ def explain(result: dict) -> str:
     )
 
 
+# Recognised product types. An alternative must be the same kind of thing:
+# reusable straws are a fine product and a useless answer to "I am buying cups".
+PRODUCT_TYPES = {
+    "cup": ("cup", "cups", "tumbler", "tumblers", "mug", "mugs", "glass", "glasses"),
+    "bottle": ("bottle", "bottles", "flask", "canteen"),
+    "straw": ("straw", "straws"),
+    "plate": ("plate", "plates", "bowl", "bowls"),
+    "cutlery": ("fork", "forks", "spoon", "spoons", "knife", "knives", "cutlery", "utensil", "utensils"),
+    "soap": ("soap", "detergent", "cleanser", "wash"),
+    "towel": ("towel", "towels", "napkin", "napkins", "wipe", "wipes"),
+    "bag": ("bag", "bags", "wrap", "wraps", "liner", "liners"),
+}
+
+
+def product_type(text: str) -> str | None:
+    """The kind of thing a listing is, when we can tell."""
+    words = set(re.findall(r"[a-z]+", (text or "").lower()))
+    best = None
+    for kind, terms in PRODUCT_TYPES.items():
+        if words & set(terms):
+            # A straw mentioned alongside cups should not beat the cups.
+            if best is None or kind == "cup":
+                best = kind
+    return best
+
+
+def same_product_type(viewed: str, candidate: str) -> bool:
+    """True unless we positively know these are different kinds of product."""
+    a, b = product_type(viewed), product_type(candidate)
+    if a is None or b is None:
+        return True  # unknown is not a reason to reject
+    return a == b
+
+
 def score_listing(listing: dict) -> dict:
     """Score one search result. Only its name is available, so be careful."""
     result = analyze_text(listing.get("name", ""))

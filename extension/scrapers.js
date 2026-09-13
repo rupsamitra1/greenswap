@@ -278,12 +278,25 @@
    * "stainless steel" describe the actual thing.
    */
   function greenerQueries(product) {
+    // Two things must come out of the query or it searches for the very
+    // product we are replacing: the brand, which is irrelevant to finding an
+    // alternative, and the words describing what is wrong with it. "reusable
+    // clawsoff plastic disposable cups" returns disposable Clawsoff cups.
+    const brandWords = new Set(
+      (product.brand || "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+    );
     const base = (product.title || "")
       .toLowerCase()
       .replace(/[^a-z0-9 ]+/g, " ")
       .split(/\s+/)
-      .filter((w) => w.length > 3 && !STOPWORDS.has(w))
-      .slice(0, 4)
+      .filter(
+        (w) =>
+          w.length > 3 &&
+          !STOPWORDS.has(w) &&
+          !AVOID_WORDS.has(w) &&
+          !brandWords.has(w)
+      )
+      .slice(0, 3)
       .join(" ");
     if (!base) return [];
     // One query, not two. Each search is a multi-megabyte download, and firing
@@ -291,6 +304,12 @@
     // us. "reusable" is the single most productive term.
     return [`reusable ${base}`];
   }
+
+  // Words naming the problem. Searching for them finds more of the problem.
+  const AVOID_WORDS = new Set([
+    "disposable", "plastic", "single", "styrofoam", "polystyrene", "foam",
+    "throwaway", "onetime",
+  ]);
 
   const STOPWORDS = new Set([
     "pack", "count", "with", "size", "large", "small", "value", "ultra",
