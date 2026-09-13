@@ -155,10 +155,12 @@ GEMINI_API_KEY = _clean(os.getenv("GEMINI_API_KEY"))
 GEMINI_MODEL = _clean(os.getenv("GEMINI_MODEL")) or "gemini-3.6-flash"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
-# Gemini's free tier allows 5 requests per minute per model, and one agent run
-# spends 3-4 of them. Left alone, browsing two products in a minute exhausts
-# the quota and every later request 429s. Waiting is far better than failing.
-LLM_RPM = int(_clean(os.getenv("LLM_RPM")) or 5)
+# Optional local pacing. Gemini's free tier benefits from a 5 RPM cap, but an
+# Azure deployment already enforces its own purchased quota. Applying the
+# Gemini cap to Azure made two product pages look like exhausted Azure credits.
+# Set 0 to trust the provider's limits and allow every product analysis through.
+_default_rpm = 5 if GEMINI_API_KEY and PROVIDER != "azure" else 0
+LLM_RPM = int(_clean(os.getenv("LLM_RPM")) or _default_rpm)
 
 # ...but a shopper is waiting on the other end of this. Queueing behind the
 # quota is only worth doing briefly; past this we answer with the heuristic
@@ -235,6 +237,8 @@ class RateBudgetExceeded(RuntimeError):
 
 def _throttle(budget: float | None = None) -> None:
     """Wait for a slot in the per-minute allowance, but not indefinitely."""
+    if LLM_RPM <= 0:
+        return
     deadline = time.monotonic() + (LLM_MAX_WAIT if budget is None else budget)
     while True:
         with _rate_lock:
