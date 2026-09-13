@@ -176,10 +176,11 @@
     }
     /* On the green verdict block */
     .verdict .badge.certified { background: #fff; color: var(--gs-green-deep); }
-    .verdict .badge.ai_estimated { background: rgba(255,255,255,.16); color: #fff; }
+    .verdict .badge.ai_estimated,
+    .verdict .badge.heuristic { background: rgba(255,255,255,.16); color: #fff; }
     /* On cream rows */
     .badge.certified { background: var(--gs-green); color: #fff; }
-    .badge.ai_estimated {
+    .badge.ai_estimated, .badge.heuristic {
       background: transparent; color: var(--gs-muted);
       border: 1px solid var(--gs-line);
     }
@@ -249,13 +250,27 @@
       font-size: 14px; font-weight: 600; line-height: 1.3;
       color: var(--gs-ink);
     }
+    a.row-name { text-decoration: none; }
+    a.row-name:hover { text-decoration: underline; }
+    a.row-name:focus-visible { outline: 2px solid var(--gs-green); outline-offset: 2px; }
+    .row-go {
+      display: inline-block; margin-top: 8px;
+      padding: 6px 12px; border-radius: 999px;
+      background: var(--gs-green); color: #fff;
+      font-size: 12px; font-weight: 600; text-decoration: none;
+      transition: background-color 140ms ease;
+    }
+    .row-go:hover { background: var(--gs-green-deep); }
+    .row-go:focus-visible { outline: 2px solid var(--gs-green); outline-offset: 2px; }
+    .row-go::after { content: " →"; }
     .row-why { font-size: 12.5px; line-height: 1.45; color: var(--gs-muted); margin-top: 4px; }
     .row-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 
     .eco {
-      display: inline-block; padding: 3px 8px; border-radius: 999px;
+      display: inline-block; padding: 3px 9px; border-radius: 999px;
       background: #e4ede7; color: var(--gs-green-deep);
-      font-size: 11px; font-weight: 700; letter-spacing: .02em;
+      font-size: 11px; font-weight: 700; letter-spacing: .01em;
+      white-space: nowrap;
     }
 
     /* Dedicated price column -- the number is never buried in prose. */
@@ -270,12 +285,19 @@
       background: var(--gs-green); color: #fff;
       font-size: 11px; font-weight: 700; white-space: nowrap;
     }
+    .unit {
+      margin-top: 3px; font-size: 11px; color: var(--gs-muted);
+      font-variant-numeric: tabular-nums;
+    }
     .save.neutral { background: #e4ede7; color: var(--gs-green-deep); }
     .save.more { background: #f0e6d8; color: #7a5320; }
 
     /* --- states --------------------------------------------------------- */
     .empty, .notice { font-size: 13px; line-height: 1.5; }
     .empty { padding: 2px 16px 14px; color: var(--gs-muted); }
+    .why { margin-top: 6px; font-size: 12px; opacity: .85; }
+    .near-label { margin-top: 7px; font-weight: 600; opacity: .9; }
+    .near { margin-top: 3px; font-size: 11.5px; opacity: .8; }
     .notice {
       margin: 0 16px 10px; padding: 10px 12px;
       background: #f0e6d8; color: #6b4a1c;
@@ -331,12 +353,14 @@
   }
 
   function badge(trust, certification) {
-    const label =
-      trust === "certified"
-        ? `✓ ${certification || "Certified"}`
-        : trust === "documented"
-          ? `✓ ${certification || "Documented"}`
-          : "~ AI estimate";
+    const labels = {
+      certified: `✓ ${certification || "Certified"}`,
+      documented: `✓ ${certification || "Documented"}`,
+      evidence: "~ Evidence estimate",
+      ai_estimated: "~ AI estimate",
+      heuristic: "~ Rule-based estimate",
+    };
+    const label = labels[trust] || labels.ai_estimated;
     return `<span class="badge ${trust}">${escapeHtml(label)}</span>`;
   }
 
@@ -353,15 +377,18 @@
       pill = `<span class="save neutral">Same price</span>`;
     }
     const basis = alt.price_basis || {};
-    const unit = basis.price_per_use != null
+    const unitText = basis.price_per_use != null
       ? `$${Number(basis.price_per_use).toFixed(3)}/use*`
       : basis.price_per_unit != null && basis.unit
-        ? `$${Number(basis.price_per_unit).toFixed(2)}/${escapeHtml(basis.unit)}` : "";
+        ? `$${Number(basis.price_per_unit).toFixed(2)}/${escapeHtml(basis.unit)}`
+        : alt.unit_price && alt.unit_label
+          ? `$${Number(alt.unit_price).toFixed(2)}/${escapeHtml(alt.unit_label)}`
+          : "";
     return `
       <div class="row-price">
         <div class="amount">$${Number(alt.price).toFixed(2)}</div>
         ${pill}
-        ${unit ? `<div class="unit">${unit}</div>` : ""}
+        ${unitText ? `<div class="unit">${unitText}</div>` : ""}
       </div>`;
   }
 
@@ -387,20 +414,34 @@
             </div>`;
   }
 
-  function renderRow(alt, index) {
-    const best = index === 0;
+  function renderRow(alt, index, all, opts = {}) {
+    // Only the cheaper list has a "best swap". Tagging the first dearer option
+    // that way says the best thing to do is spend more, which is the opposite
+    // of what this product promises.
+    const best = index === 0 && opts.tagBest !== false;
     return `
       <div class="row ${best ? "best" : ""}">
         ${best ? `<span class="tag">Best swap</span>` : ""}
         <div class="row-main">
-          <div class="row-name">${escapeHtml(alt.name)}</div>
+          ${
+            alt.url
+              ? `<a class="row-name" href="${escapeHtml(alt.url)}"
+                     target="_blank" rel="noopener noreferrer"
+                  >${escapeHtml(alt.name)}</a>`
+              : `<div class="row-name">${escapeHtml(alt.name)}</div>`
+          }
           <div class="row-why">${escapeHtml(alt.reason)}</div>
           <div class="row-meta">
-            <span class="eco">Eco ${alt.eco_score}</span>
+            <span class="eco">Eco score: ${alt.eco_score}</span>
             ${badge(alt.trust, alt.certification)}
             ${alt.affiliate ? `<span class="partner">Partner link</span>` : ""}
           </div>
-          ${alt.purchase_url ? `<a class="shop" href="${escapeHtml(alt.purchase_url)}" target="_blank" rel="noopener noreferrer">View product ↗</a>` : ""}
+          ${
+            alt.purchase_url || alt.url
+              ? `<a class="row-go shop" href="${escapeHtml(alt.purchase_url || alt.url)}"
+                     target="_blank" rel="noopener noreferrer">View product ↗</a>`
+              : ""
+          }
         </div>
         ${priceCell(alt)}
       </div>`;
@@ -410,22 +451,58 @@
     const { original, alternatives } = data;
     const pricier = data.pricier || [];
 
-    let body;
+    // Cheaper-or-equal options are the answer. Dearer ones are always available
+    // but never volunteered -- the shopper opts in, so a pricier suggestion is
+    // something they asked for rather than something we slipped in.
+    let body = "";
     if (alternatives.length) {
       body = `<div class="rows">${alternatives.map(renderRow).join("")}</div>`;
     } else if (pricier.length) {
-      // Dearer options stay behind an explicit opt-in. The shopper chooses to
-      // spend more; we never decide it for them.
-      body = `
-        <div class="empty">Nothing greener at or below this price.</div>
-        <button class="reveal" aria-expanded="false">
-          Show ${pricier.length} that cost more
-        </button>
-        <div class="pricier rows" hidden>${pricier.map(renderRow).join("")}</div>`;
+      body = `<div class="empty">Nothing greener at or below this price.</div>`;
     } else if (data.keep_current) {
       body = `<div class="keep">Keep this one. We found no sufficiently better option at this price.</div>`;
     } else {
-      body = `<div class="empty">We do not have enough comparable evidence to recommend a swap yet.</div>`;
+      // Say which kind of nothing this is. "We could not read this page" and
+      // "we checked twelve and none qualified" call for different reactions.
+      const d = data.diagnostics || {};
+      let why;
+      if (!d.listings_considered) {
+        why = `We couldn't read other listings from this page, so there is
+               nothing to compare against yet.`;
+      } else {
+        const bits = [];
+        if (d.too_low_scoring) bits.push(`${d.too_low_scoring} weren't meaningfully greener`);
+        if (d.too_expensive) bits.push(`${d.too_expensive} cost more`);
+        const closest = (d.closest || [])
+          .map(
+            (c) =>
+              `<div class="near">${escapeHtml(c.name.slice(0, 60))} — scored ${
+                c.eco_score
+              }${c.price ? `, $${Number(c.price).toFixed(2)}` : ""}</div>`
+          )
+          .join("");
+        why =
+          `We checked ${d.listings_considered} other listing${
+            d.listings_considered === 1 ? "" : "s"
+          } on this page${bits.length ? ` — ${bits.join(", ")}` : ""}.` +
+          (closest
+            ? `<div class="near-label">Closest we found (needs ${d.min_score}+):</div>${closest}`
+            : "");
+      }
+      body = `<div class="empty">No greener option at or below this price yet.
+                We never suggest an alternative that costs more.
+                <div class="why">${why}</div></div>`;
+    }
+
+    if (pricier.length) {
+      const label = alternatives.length
+        ? `See ${pricier.length} greener option${pricier.length > 1 ? "s" : ""} that cost more`
+        : `Show ${pricier.length} that cost more`;
+      body += `
+        <button class="reveal" aria-expanded="false">${label}</button>
+        <div class="pricier rows" hidden>${pricier
+          .map((alt, i, all) => renderRow(alt, i, all, { tagBest: false }))
+          .join("")}</div>`;
     }
 
     // Showing the current price alongside makes the comparison concrete
@@ -546,18 +623,81 @@
     });
   }
 
+  /** True only while this script still has a live extension context. */
+  function alive() {
+    try {
+      return Boolean(globalThis.chrome?.runtime?.id);
+    } catch (err) {
+      return false; // touching a dead context can throw outright
+    }
+  }
+
   const product = self.GreenSwapScrapers.detect();
   if (!product || !product.title) return;
 
-  chrome.runtime.sendMessage(
-    { type: "GREENSWAP_ANALYZE", product },
-    (response) => {
-      if (chrome.runtime.lastError || !response) return;
-      if (!response.ok) {
-        console.warn("[GreenSwap]", response.error);
-        return;
+  /**
+   * Look for real alternatives on the store before asking the backend, so the
+   * agent reasons about listings that actually exist -- with real prices and
+   * real product links -- rather than a small hand-kept catalog.
+   *
+   * The search happens here rather than server-side because this code is
+   * already inside the retailer's origin with the shopper's session.
+   */
+  async function start() {
+    if (!alive()) return; // orphaned before we even began
+
+    // Announce the build up front. Without this there is no way to tell a
+    // stale extension from a broken one, and they look identical from here.
+    console.log(
+      "[GreenSwap] v" + chrome.runtime.getManifest().version + " active"
+    );
+
+    try {
+      product.listings = await self.GreenSwapScrapers.findCandidates(product);
+      if (product.retailer === "amazon") {
+        // Visible diagnostic: if this is 0 the retailer's search markup has
+        // moved, and recommendations will silently fall back to the catalog.
+        console.log(
+          `[GreenSwap] ${product.listings.length} live listings found`,
+          product.listings.map((l) => `${l.name.slice(0, 40)} $${l.price}`)
+        );
       }
-      mount(response.data);
+    } catch (err) {
+      console.warn("[GreenSwap] live search failed:", err.message);
+      product.listings = []; // a failed search must not cost us the card
     }
-  );
+
+    // Reloading the extension orphans content scripts already running in open
+    // tabs: chrome.runtime disappears underneath them. Awaiting the retailer
+    // search widens that window, so check before using it rather than throwing
+    // an uncaught error into the page.
+    if (!alive()) {
+      console.warn("[GreenSwap] extension was reloaded — refresh this page");
+      return;
+    }
+
+    console.log("[GreenSwap] asking backend...");
+    chrome.runtime.sendMessage(
+      { type: "GREENSWAP_ANALYZE", product },
+      (response) => {
+        if (chrome.runtime.lastError || !response) {
+          console.warn(
+            "[GreenSwap] no reply from the service worker:",
+            chrome.runtime.lastError?.message ||
+              "it was probably terminated mid-request"
+          );
+          return;
+        }
+        if (!response.ok) {
+          console.warn("[GreenSwap]", response.error);
+          return;
+        }
+        mount(response.data);
+      }
+    );
+  }
+
+  // Nothing from an async entry point should surface as an uncaught rejection
+  // in someone else's page.
+  start().catch((err) => console.warn("[GreenSwap]", err?.message || err));
 })();

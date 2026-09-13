@@ -53,7 +53,10 @@ Use the tools available to you:
   certification database. Always try this first.
 - lookup_certification_program: get the official reference for a certification
   programme so the shopper can check it themselves.
-- search_alternatives: find greener products in the same category.
+- search_live_listings: see what is actually for sale on the store the shopper
+  is using right now, with real prices and links. Use this to find greener
+  alternatives beyond our small catalog.
+- search_alternatives: our own curated catalog of greener products.
 
 Score against this rubric so that scores mean the same thing across products:
   0-30   Single-use or disposable; virgin plastic; harsh chemistry.
@@ -70,12 +73,26 @@ When you have enough information, reply with ONLY this JSON:
   "certification": "exact programme name, or null if none was FOUND BY A TOOL",
   "citations": [
     {"claim": "what this source supports", "source": "name", "url": "https://..."}
+  ],
+  "picks": [
+    {
+      "url": "the EXACT url of a listing a tool returned",
+      "eco_score": 0-100,
+      "reason": "one sentence on why this is greener than what they are viewing"
+    }
   ]
 }
 
+"picks" are your recommended alternatives, chosen ONLY from listings a tool
+actually returned. Judge each on materials, reusability, refillability and
+packaging -- a listing being cheap is not a reason to pick it, and neither is
+its name containing "eco" or "natural". Pick nothing rather than pick badly:
+an empty list is a valid and honest answer. Do not restate prices; we take
+those from the store.
+
 Rules:
-- Only cite URLs that a tool actually returned to you. Never write a URL from
-  memory.
+- Only cite or pick URLs that a tool actually returned to you. Never write a
+  URL from memory, and never invent a product.
 - Set "certification" only when search_certifications returned one for THIS
   product. If it did not, the honest answer is null and an estimate.
 - When the listing does not say, assume the commonplace version of the product
@@ -116,6 +133,26 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "search_live_listings",
+            "description": "Search what is actually for sale on the retailer the "
+                           "shopper is using, right now. These are real listings "
+                           "the browser fetched from the store, with real prices "
+                           "and links. Use this to find alternatives that are not "
+                           "in our certification database.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_price": {
+                        "type": "number",
+                        "description": "Only return listings at or below this price.",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_alternatives",
             "description": "Find greener products in a category, optionally at or "
                            "below a price.",
@@ -143,6 +180,15 @@ class Evidence:
         self.urls: set[str] = set()
         self.certifications: set[str] = set()
         self.tool_calls: list[dict] = []
+        # Listings the tools actually returned, keyed by URL. A recommendation
+        # is only allowed to name one of these -- the model may choose, never
+        # invent, and the price comes from the store rather than the model.
+        self.listings: dict[str, dict] = {}
+
+    def record_listing(self, listing: dict):
+        url = str(listing.get("url") or "").strip()
+        if url:
+            self.listings[url] = listing
 
     def record_url(self, url):
         if url:
@@ -191,6 +237,26 @@ def execute_tool(name: str, args: dict, deps: dict, evidence: Evidence) -> dict:
         evidence.record_url(program["url"])
         return {"found": True, **program}
 
+    if name == "search_live_listings":
+        listings = deps.get("live_listings") or []
+        cap = args.get("max_price")
+        if cap is not None:
+            listings = [c for c in listings if c.get("price") is not None
+                        and c["price"] <= cap]
+        for c in listings:
+            evidence.record_url(c.get("url"))
+            evidence.record_listing(c)
+        return {
+            "count": len(listings),
+            "note": "Real listings from the store the shopper is on. You may "
+                    "only recommend items from this list or the catalog -- "
+                    "never invent a product.",
+            "listings": [
+                {"name": c["name"], "price": c.get("price"), "url": c.get("url")}
+                for c in listings[:20]
+            ],
+        }
+
     if name == "search_alternatives":
         rows = deps["find_alternatives"](
             category=args.get("category", "other"),
@@ -235,6 +301,35 @@ def verify_claims(result: dict, evidence: Evidence) -> dict:
                 "url": url,
             })
     result["citations"] = citations[:4]
+
+    # Picks may only name listings a tool actually returned, and the price is
+    # taken from the store rather than from the model. Same principle as the
+    # citations above: the model chooses, it does not assert.
+    picks = []
+    for pick in result.get("picks") or []:
+        if not isinstance(pick, dict):
+            continue
+        listing = evidence.listings.get(str(pick.get("url", "")).strip())
+        if not listing:
+            continue
+        try:
+            score = max(0, min(100, int(float(pick.get("eco_score", 0)))))
+        except (TypeError, ValueError):
+            score = 0
+        picks.append({
+            # Stable id derived from the listing URL, so live picks slot into
+            # the same response shape as catalog rows.
+            "id": "live-" + listing["url"].rstrip("/").rsplit("/", 1)[-1],
+            "name": listing["name"],
+            "price": listing.get("price"),
+            "url": listing["url"],
+            "eco_score": score,
+            "reason": str(pick.get("reason", ""))[:220],
+            "trust": "ai_estimated",
+            "certification": None,
+            "source": listing.get("source", "live"),
+        })
+    result["picks"] = picks[:5]
 
     claimed = str(result.get("certification") or "").strip()
     if claimed and claimed.lower() not in evidence.certifications:

@@ -1,13 +1,15 @@
 {
   "manifest_version": 3,
   "name": "GreenSwap",
-  "version": "0.8.0",
+  "version": "0.24.0",
   "description": "Explains evidence-backed environmental scores and suggests meaningfully better options at the same price or cheaper.",
   "permissions": [
     "storage"
   ],
   "host_permissions": [
-    "http://localhost/*"
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://www.amazon.com/*"
   ],
   "background": {
     "service_worker": "background.js"

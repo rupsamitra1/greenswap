@@ -20,10 +20,13 @@ Run:
 import json
 import os
 import re
+import threading
 import time
+import urllib.parse
+import types
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,7 +42,8 @@ try:
     from backend.pricing import price_basis
     from backend.ranking import rank_candidates
     from backend.scoring import METHOD_VERSION
-    from backend import agent as agent_mod
+    from backend import agent as agent_mod, evaluation as evidence_eval
+    from backend import heuristics, identification, pricing, product_search
 except ModuleNotFoundError:
     from identification import identify_product
     from demo_catalog import alternatives as catalog_alternatives
@@ -48,6 +52,11 @@ except ModuleNotFoundError:
     from ranking import rank_candidates
     from scoring import METHOD_VERSION
     import agent as agent_mod
+    import evaluation as evidence_eval
+    import heuristics
+    import identification
+    import pricing
+    import product_search
 
 def _ensure_env_file() -> None:
     """Create .env from .env.example on first run.
@@ -73,7 +82,22 @@ app.add_middleware(
     allow_origins=["*"],  # tighten for production
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=600,
 )
+
+@app.middleware("http")
+async def allow_private_network(request, call_next):
+    """Permit requests from a public page to this local server.
+
+    Chrome's Private Network Access rules gate requests that originate from a
+    public site (amazon.com) toward a private address (localhost). Without this
+    header the extension works on the local mock store and fails on Amazon --
+    which looks like a backend outage rather than a browser policy.
+    """
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
+
 
 # The mock storefront is served by this same process so the extension only ever
 # needs one origin permission (http://localhost:8000/*).
@@ -131,6 +155,22 @@ GEMINI_API_KEY = _clean(os.getenv("GEMINI_API_KEY"))
 GEMINI_MODEL = _clean(os.getenv("GEMINI_MODEL")) or "gemini-3.6-flash"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
+# Gemini's free tier allows 5 requests per minute per model, and one agent run
+# spends 3-4 of them. Left alone, browsing two products in a minute exhausts
+# the quota and every later request 429s. Waiting is far better than failing.
+LLM_RPM = int(_clean(os.getenv("LLM_RPM")) or 5)
+
+# ...but a shopper is waiting on the other end of this. Queueing behind the
+# quota is only worth doing briefly; past this we answer with the heuristic
+# rather than leave a product page hanging.
+LLM_MAX_WAIT = float(_clean(os.getenv("LLM_MAX_WAIT")) or 8)
+
+# Hard ceiling on a single /analyze. Chrome terminates an MV3 service worker
+# that sits idle for roughly 30 seconds, so a slow answer is not a slow answer
+# -- it is no answer at all, and the card never renders. Past this we return
+# the rules-based result, which is always ready.
+ANALYZE_DEADLINE = float(_clean(os.getenv("ANALYZE_DEADLINE")) or 18)
+
 # Surfaced by /health and /selftest so a misconfigured key is visible rather
 # than silently degrading into the offline fallback.
 AGENT_ENABLED = (_clean(os.getenv("GREENSWAP_AGENT")) or "on").lower() != "off"
@@ -138,11 +178,117 @@ AGENT_ENABLED = (_clean(os.getenv("GREENSWAP_AGENT")) or "on").lower() != "off"
 llm_status: dict = {"calls": 0, "failures": 0, "last_error": None, "json_mode": True,
                        "agent_runs": 0, "agent_failures": 0}
 
+# Affiliate tag, appended to outbound links when set. This is the hook for the
+# primary revenue stream in the business model; without it the links still work,
+# they just earn nothing.
+AMAZON_AFFILIATE_TAG = _clean(os.getenv("AMAZON_AFFILIATE_TAG"))
+
+# Fallback product search, used only when the browser's own scrape comes back
+# empty. The free tier is 100 requests/month, so results are cached by query.
+CANOPY_API_KEY = _clean(os.getenv("CANOPY_API_KEY"))
+_search_cache: dict[str, list[dict]] = {}
+
+# An alternative must beat the original by this much to be worth suggesting.
+ECO_SCORE_MARGIN = 10
+
+# ...and must be genuinely green in its own right. A relative margin alone is
+# not enough: when the viewed product scores 15, "beat it by 10" admits a 25,
+# and disposable plastic cups get recommended as the greener swap for
+# disposable plastic cups. 60 is the floor of the durable/reusable band.
+MIN_RECOMMEND_SCORE = int(_clean(os.getenv("MIN_RECOMMEND_SCORE")) or 60)
+
+# Which scorer answers when no model is available.
+#
+#   auto   evidence pipeline when it can answer, rules when it cannot
+#   rules  keyword signals only
+#
+# There is deliberately no evidence-only mode. That pipeline scores from
+# documented facts and declines otherwise, and a retail listing documents
+# almost nothing -- its catalog matches on SKU or model number, which scraped
+# listings do not carry. Evidence-only would therefore answer "insufficient"
+# for essentially every real product, and a mode that always says nothing is
+# worse than no mode. "auto" uses evidence the moment real product data exists
+# and stays useful until then.
+SCORER = (_clean(os.getenv("GREENSWAP_SCORER")) or "auto").lower()
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     from supabase import create_client
 
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def _retry_delay_seconds(message: str) -> float:
+    """Google states exactly how long to wait; obey it rather than guessing."""
+    for pattern in (r"'retryDelay':\s*'([\d.]+)s'", r"retry in ([\d.]+)s"):
+        found = re.search(pattern, message)
+        if found:
+            return min(float(found.group(1)) + 0.5, 30.0)
+    return 5.0
+
+
+_rate_lock = threading.Lock()
+_recent_calls: deque = deque()
+
+
+class RateBudgetExceeded(RuntimeError):
+    """No quota slot within the time a shopper should be asked to wait."""
+
+
+def _throttle(budget: float | None = None) -> None:
+    """Wait for a slot in the per-minute allowance, but not indefinitely."""
+    deadline = time.monotonic() + (LLM_MAX_WAIT if budget is None else budget)
+    while True:
+        with _rate_lock:
+            now = time.monotonic()
+            while _recent_calls and now - _recent_calls[0] > 60:
+                _recent_calls.popleft()
+            if len(_recent_calls) < LLM_RPM:
+                _recent_calls.append(now)
+                return
+            wait = 60 - (now - _recent_calls[0]) + 0.25
+
+        if time.monotonic() + wait > deadline:
+            raise RateBudgetExceeded(
+                f"rate limit: no slot within {LLM_MAX_WAIT:.0f}s "
+                f"({LLM_RPM}/min allowance)"
+            )
+        print(f"[GreenSwap] rate limit reached, waiting {wait:.1f}s")
+        time.sleep(max(wait, 0.1))
+
+
+class ThrottledClient:
+    """Wraps the provider client so every call is paced and 429-aware.
+
+    The agent loop and the single-call path both go through here, so the
+    allowance is shared rather than each path having its own idea of it.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.chat = types.SimpleNamespace(
+            completions=types.SimpleNamespace(create=self._create)
+        )
+
+    def _create(self, **kwargs):
+        last = None
+        for attempt in range(3):
+            _throttle()
+            try:
+                return self._inner.chat.completions.create(**kwargs)
+            except Exception as exc:
+                message = str(exc)
+                if "429" not in message and "RESOURCE_EXHAUSTED" not in message:
+                    raise
+                last = exc
+                delay = _retry_delay_seconds(message)
+                if delay > LLM_MAX_WAIT:
+                    raise RateBudgetExceeded(
+                        f"rate limit: provider asked for {delay:.0f}s"
+                    ) from exc
+                print(f"[GreenSwap] 429; retrying in {delay:.1f}s "
+                      f"(attempt {attempt + 1}/3)")
+                time.sleep(delay)
+        raise last
+
 
 llm_client = None
 MODEL_NAME = None
@@ -161,6 +307,7 @@ if PROVIDER == "gemini" or (_want_gemini and PROVIDER != "azure"):
             timeout=REQUEST_TIMEOUT,
             max_retries=2,
         )
+        llm_client = ThrottledClient(llm_client)
         MODEL_NAME = GEMINI_MODEL
         ACTIVE_PROVIDER = "gemini"
 elif _want_azure:
@@ -173,6 +320,7 @@ elif _want_azure:
         timeout=REQUEST_TIMEOUT,
         max_retries=2,
     )
+    llm_client = ThrottledClient(llm_client)
     MODEL_NAME = AZURE_DEPLOYMENT
     ACTIVE_PROVIDER = "azure"
 
@@ -183,6 +331,21 @@ _memory_cache: dict[str, dict] = {}
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
+class Listing(BaseModel):
+    """One real search result the extension pulled from the retailer.
+
+    The browser does this fetch, not the server: the content script is already
+    inside the retailer's origin with the shopper's own session, so results
+    load the way they would for any visitor. A server doing it would be
+    scraping from a datacenter IP and would be blocked in short order.
+    """
+
+    name: str
+    price: float | None = None
+    url: str | None = None
+    source: str | None = "live"
+
+
 class Product(BaseModel):
     """Structured product data scraped from the page by the content script."""
 
@@ -197,6 +360,8 @@ class Product(BaseModel):
     gtin: str | None = None
     model_number: str | None = None
     sku: str | None = None
+    # Candidate alternatives the extension already fetched from the store.
+    listings: list[Listing] = []
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +477,9 @@ def cache_put(key: str, product: Product, estimate: dict, evidence_fingerprint: 
         "citations": estimate.get("citations") or [],
         "verified": bool(estimate.get("verified")),
         "certification": estimate.get("certification"),
+        # Without this a cached rule-based score comes back labelled as an AI
+        # estimate, which is precisely the confusion the labels exist to stop.
+        "source": estimate.get("source"),
     }
     if supabase:
         try:
@@ -359,19 +527,74 @@ is established elsewhere, from a database, and claiming one here would be a
 false verification."""
 
 
-def offline_estimate(product: Product) -> dict:
-    """Honest fallback when no LLM is configured."""
-    category = guess_category(f"{product.title} {' '.join(product.bullets)}")
+def evidence_estimate(product: Product) -> dict | None:
+    """Score from documented facts, or return None when there are too few.
+
+    Returning None is the point: this pipeline declines to guess, which is
+    right for a verdict and useless as the only answer.
+    """
+    try:
+        result = evidence_eval.evaluate_product({
+            "title": product.title,
+            "name": product.title,
+            "brand": product.brand,
+            "url": product.url,
+            "price": product.price,
+            "bullets": product.bullets,
+            "category": guess_category(
+                f"{product.title} {' '.join(product.bullets)}"
+            ),
+        })
+    except Exception as exc:
+        print(f"[GreenSwap] evidence scorer failed: {exc}")
+        return None
+
+    analysis = result.get("analysis") or {}
+    score = analysis.get("overall_score")
+    if score is None:
+        return None
+
+    dimensions = [d for d in analysis.get("dimensions", []) if d.get("assessment")]
+    detail = ", ".join(
+        f"{d['dimension'].replace('_', ' ')}: {d['assessment'].replace('_', ' ')}"
+        for d in dimensions[:3]
+    )
     return {
-        "category": category,
-        "materials": ["unknown"],
+        "category": analysis.get("category") or guess_category(product.title),
+        "materials": [d["dimension"].replace("_", " ") for d in dimensions][:6] or ["documented"],
         "citations": [],
         "verified": False,
-        "eco_score": 40,
+        "source": "evidence",
+        "eco_score": int(score),
         "reason": (
+            f"Scored from documented facts ({analysis.get('confidence', 'low')} "
+            f"confidence, {analysis.get('coverage_percent', 0)}% evidence coverage)"
+            + (f" — {detail}." if detail else ".")
+        ),
+        "analysis": analysis,
+    }
+
+
+def offline_estimate(product: Product, note: str | None = None) -> dict:
+    """Honest fallback when the model cannot answer.
+
+    The reason matters: "not configured" and "rate limited" look identical to a
+    shopper but mean completely different things to whoever is running this.
+    """
+    text = f"{product.title} {' '.join(product.bullets)}"
+    category = guess_category(text)
+    rules = heuristics.analyze_text(text)
+    return {
+        "category": category,
+        "materials": rules["materials"],
+        "citations": [],
+        "verified": False,
+        "source": "heuristic",
+        "eco_score": rules["eco_score"],
+        "reason": note or (heuristics.explain(rules) if rules["confident"] else (
             "Scored cautiously from the product name alone — AI analysis "
             "is not configured, so materials could not be inferred."
-        ),
+        )),
     }
 
 
@@ -502,19 +725,40 @@ def call_llm(listing: str) -> dict:
         raise
 
 
-def estimate_with_ai(product: Product) -> dict:
+def choose_offline_scorer(product: Product, note: str | None = None) -> dict:
+    """Evidence first when configured, rules when evidence cannot answer."""
+    if SCORER == "auto":
+        scored = evidence_estimate(product)
+        if scored is not None:
+            return scored
+    return offline_estimate(product, note=note)
+
+
+def estimate_with_ai(product: Product, deadline: float | None = None) -> dict:
     if not llm_client:
-        return offline_estimate(product)
+        return choose_offline_scorer(product)
+
+    def remaining() -> float:
+        return 1e9 if deadline is None else deadline - time.monotonic()
+
+    # An agent run is several sequential calls; do not start one we cannot
+    # finish inside the budget.
+    if remaining() < 12:
+        return choose_offline_scorer(product, note=(
+            "Scored from the listing text — the AI was too slow to answer "
+            "within the time a page should wait."
+        ))
 
     llm_status["calls"] += 1
     try:
         listing = build_listing(product)
-        if AGENT_ENABLED:
+        if AGENT_ENABLED and remaining() > 12:
             try:
                 raw = agent_mod.run_agent(
                     llm_client, MODEL_NAME, listing,
                     {"lookup_certified": lookup_certified,
-                     "find_alternatives": find_alternatives},
+                     "find_alternatives": find_alternatives,
+                     "live_listings": [l.model_dump() for l in product.listings]},
                     parse_model_json,
                 )
                 result = normalize_estimate(raw, product.title)
@@ -524,6 +768,8 @@ def estimate_with_ai(product: Product) -> dict:
                 result["verified"] = bool(raw.get("verified"))
                 result["certification"] = raw.get("certification")
                 result["agent_steps"] = len(raw.get("tool_calls", []))
+                result["picks"] = raw.get("picks", [])
+                result["source"] = "agent"
                 llm_status["agent_runs"] += 1
                 llm_status["last_error"] = None
                 return result
@@ -534,8 +780,14 @@ def estimate_with_ai(product: Product) -> dict:
                 llm_status["last_error"] = f"agent: {type(exc).__name__}: {exc}"
                 print(f"[GreenSwap] agent failed, using single call: {exc}")
 
+        if remaining() < 3:
+            return choose_offline_scorer(product, note=(
+                "Scored from the listing text — the AI was too slow to answer "
+                "within the time a page should wait."
+            ))
         raw = call_llm(listing)
         result = normalize_estimate(raw, product.title)
+        result["source"] = "model"
         llm_status["last_error"] = None
         return result
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
@@ -553,12 +805,56 @@ def estimate_with_ai(product: Product) -> dict:
         llm_status["failures"] += 1
         llm_status["last_error"] = f"{type(exc).__name__}: {exc}"
         print(f"[GreenSwap] model call failed: {llm_status['last_error']}")
+        message = str(exc)
+        if any(k in message for k in ("429", "RESOURCE_EXHAUSTED", "rate limit")):
+            return choose_offline_scorer(product, note=(
+                "Scored from the product name alone — the AI quota is "
+                "temporarily exhausted, so materials could not be inferred."
+            ))
         return offline_estimate(product)
 
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+def with_price_basis(row: dict) -> dict:
+    """Attach sticker/unit pricing.
+
+    Comparing $12.99 against $9.99 says nothing when one is 100 cups and the
+    other is 25. This is what makes "cheaper" mean cheaper.
+    """
+    basis = pricing.price_basis(row)
+    if basis.get("price_per_unit") and basis.get("unit"):
+        row["unit_price"] = basis["price_per_unit"]
+        row["unit_label"] = basis["unit"]
+        row["unit_quantity"] = basis["quantity"]
+    return row
+
+
+def buy_url(row: dict, retailer: str | None = None) -> str:
+    """A link the shopper can actually act on.
+
+    We link to a retailer search for the product rather than a product page,
+    because the catalog holds names rather than listings. It is honest -- the
+    shopper lands on real results for that exact item -- and it is where the
+    affiliate tag attaches when there is one.
+    """
+    if row.get("url"):
+        return row["url"]  # a real listing link beats a search link
+
+    terms = " ".join(filter(None, [row.get("brand"), row.get("name")]))
+    query = urllib.parse.quote_plus(terms)
+    if (retailer or "").lower() == "walmart":
+        return f"https://www.walmart.com/search?q={query}"
+    if (retailer or "").lower() == "target":
+        return f"https://www.target.com/s?searchTerm={query}"
+
+    url = f"https://www.amazon.com/s?k={query}"
+    if AMAZON_AFFILIATE_TAG:
+        url += f"&tag={urllib.parse.quote_plus(AMAZON_AFFILIATE_TAG)}"
+    return url
+
+
 def _program_citation(certification: str | None) -> list[dict]:
     """Turn a certification name into a link the shopper can check."""
     program = agent_mod.CERTIFICATION_PROGRAMS.get(str(certification or "").lower())
@@ -573,6 +869,7 @@ def _program_citation(certification: str | None) -> list[dict]:
 
 @app.post("/analyze")
 def analyze(product: Product):
+    deadline = time.monotonic() + ANALYZE_DEADLINE
     product_data = product.model_dump() if hasattr(product, "model_dump") else product.dict()
     structured = evaluate_product(product_data)
     profile = structured["profile"]
@@ -612,19 +909,26 @@ def analyze(product: Product):
         if estimate:
             cached = True
         else:
-            estimate = estimate_with_ai(product)
+            estimate = estimate_with_ai(product, deadline=deadline)
             cache_put(key, product, estimate, structured["evidence_fingerprint"])
 
         # The agent may have verified this against the certification database.
         # agent.verify_claims has already discarded any certification a tool did
         # not actually return, so trusting it here is safe.
         verified = bool(estimate.get("verified"))
+        # Say which process actually produced this. Calling a rules-based score
+        # an "AI estimate" would be a small lie in the one place the product
+        # cannot afford one.
+        estimated_by = {
+            "heuristic": "heuristic",
+            "evidence": "evidence",
+        }.get(estimate.get("source"), "ai_estimated")
         original = {
             "name": product.title,
             "brand": product.brand or "",
             "price": product.price or 0,
             "eco_score": estimate["eco_score"],
-            "trust": "certified" if verified else "ai_estimated",
+            "trust": "certified" if verified else estimated_by,
             "certification": estimate.get("certification"),
             "materials": estimate.get("materials", []),
             "reason": estimate["reason"],
@@ -659,27 +963,118 @@ def analyze(product: Product):
     rank_input = {"category": category, "price": original["price"], "analysis": original["analysis"]}
     ranking = rank_candidates(rank_input, evaluated_candidates, price_ceiling=price_known)
     alternatives = ranking["candidates"][:3]
-    pricier = []
-    if price_known and not alternatives:
-        unrestricted = rank_candidates(rank_input, evaluated_candidates, price_ceiling=False)
-        pricier = [item for item in unrestricted["candidates"] if item["price"] > original["price"]][:3]
+    # Ranking annotates candidate dictionaries in place. Use shallow copies for
+    # the optional pricier pass so it cannot erase the disclosed boost applied
+    # to the primary same-price-or-cheaper result.
+    unrestricted = rank_candidates(
+        rank_input, [dict(item) for item in evaluated_candidates], price_ceiling=False
+    )
+    pricier = ([item for item in unrestricted["candidates"]
+                if price_known and item["price"] > original["price"]][:3])
 
-    def public_candidate(a, dearer=False):
-        score = a["analysis"]["overall_score"]
-        result = {
-            "id": a["id"], "name": a["name"], "brand": a.get("brand", ""),
-            "price": a.get("price", 0), "eco_score": score, "trust": "documented",
-            "certification": a.get("certification"), "reason": a.get("reason", ""),
-            "emoji": a.get("emoji", "🌿"), "analysis": a["analysis"],
-            "price_basis": a["price_basis"], "purchase_url": a.get("purchase_url"),
-            "affiliate": bool(a.get("affiliate")), "affiliate_boost": a.get("affiliate_boost", 0),
-            "affiliate_influenced_order": bool(a.get("affiliate_influenced_order")),
-            "ranking_explanation": a.get("ranking_explanation", ""),
+    # A real retailer uses only listings found on that retailer. The fictional
+    # demo catalog remains available exclusively on the local mock storefront.
+    min_score = max(original["eco_score"] + ECO_SCORE_MARGIN, MIN_RECOMMEND_SCORE)
+    on_real_store = bool(product.retailer) and product.retailer != "mockstore"
+
+    if on_real_store and not product.listings and CANOPY_API_KEY:
+        for query in product_search.greener_queries(product.title):
+            if query in _search_cache:
+                product.listings += [Listing(**row) for row in _search_cache[query]]
+                continue
+            try:
+                found = product_search.search(query, CANOPY_API_KEY)
+                _search_cache[query] = found
+                product.listings += [Listing(**row) for row in found]
+            except Exception as exc:
+                print(f"[GreenSwap] product API failed for {query!r}: {exc}")
+
+    scored_listings = []
+    if on_real_store:
+        scored_listings = [
+            heuristics.score_listing(listing.model_dump())
+            for listing in product.listings
+            if heuristics.same_product_type(product.title, listing.name)
+        ]
+
+        proposed = [] if profile or certified else (estimate.get("picks") or [])
+        live_picks = [
+            pick for pick in proposed
+            if pick.get("price") is not None
+            and (not price_known or pick["price"] <= original["price"])
+            and pick.get("eco_score", 0) >= min_score
+            and heuristics.same_product_type(product.title, pick.get("name", ""))
+        ]
+        if not live_picks:
+            live_picks = heuristics.rank_listings(
+                [listing.model_dump() for listing in product.listings
+                 if heuristics.same_product_type(product.title, listing.name)],
+                min_score=min_score,
+                max_price=original["price"] if price_known else None,
+            )
+        live_picks.sort(key=lambda item: (-item["eco_score"], item.get("price") or 0))
+        alternatives = live_picks[:3]
+
+        dearer = heuristics.rank_listings(
+            [listing.model_dump() for listing in product.listings
+             if heuristics.same_product_type(product.title, listing.name)],
+            min_score=min_score,
+            max_price=None,
+            limit=8,
+        )
+        chosen = {item.get("url") for item in alternatives}
+        pricier = [item for item in dearer
+                   if item.get("url") not in chosen and price_known
+                   and item.get("price") is not None and item["price"] > original["price"]][:3]
+        ranking = {
+            "policy": {"minimum_improvement": ECO_SCORE_MARGIN,
+                       "minimum_recommend_score": MIN_RECOMMEND_SCORE,
+                       "affiliate_points_added_to_eco_score": 0},
+            "rejected": [], "affiliate_influenced": False,
+            "keep_current": False,
         }
+
+    diagnostics = {
+        "listings_considered": len(scored_listings),
+        "min_score": min_score,
+        "viewed_score": original["eco_score"],
+        "too_low_scoring": sum(item["eco_score"] < min_score for item in scored_listings),
+        "too_expensive": sum(price_known and (item.get("price") or 0) > original["price"]
+                             for item in scored_listings),
+    }
+    near_misses = sorted(
+        ((item["eco_score"], item["name"], item.get("price")) for item in scored_listings),
+        reverse=True,
+    )
+    diagnostics["closest"] = [
+        {"name": n, "eco_score": sc, "price": pr} for sc, n, pr in near_misses[:2]
+    ]
+
+    def public_candidate(item, dearer=False):
+        analysis = item.get("analysis")
+        score = analysis.get("overall_score") if analysis else item.get("eco_score")
+        result = {
+            "id": item["id"], "name": item["name"], "brand": item.get("brand", ""),
+            "price": item.get("price", 0), "eco_score": score,
+            "trust": "documented" if analysis else item.get("trust", "ai_estimated"),
+            "certification": item.get("certification"), "reason": item.get("reason", ""),
+            "emoji": item.get("emoji", "🌿"), "analysis": analysis,
+            "price_basis": item.get("price_basis") or price_basis(item),
+            "purchase_url": item.get("purchase_url") or buy_url(item, product.retailer),
+            "url": item.get("url") or buy_url(item, product.retailer),
+            "affiliate": bool(item.get("affiliate")),
+            "affiliate_boost": item.get("affiliate_boost", 0),
+            "affiliate_influenced_order": bool(item.get("affiliate_influenced_order")),
+            "ranking_explanation": item.get("ranking_explanation", ""),
+        }
+        enriched = with_price_basis(dict(item))
+        for key in ("unit_price", "unit_label", "unit_quantity"):
+            if key in enriched:
+                result[key] = enriched[key]
         if dearer:
-            result["extra_cost"] = round(a["price"] - original["price"], 2)
+            result["extra_cost"] = round(item["price"] - original["price"], 2)
         else:
-            result["savings"] = round(original["price"] - a["price"], 2) if price_known else None
+            result["savings"] = round(original["price"] - item["price"], 2) if price_known else None
         return result
 
     return {
@@ -696,10 +1091,11 @@ def analyze(product: Product):
             {"label": "Identify", "detail": structured["identity"]["identity_strength"] + " product match"},
             {"label": "Extract", "detail": "documented facts separated from marketing claims"},
             {"label": "Score", "detail": f"{original['analysis']['coverage_percent']}% rubric coverage"},
-            {"label": "Compare", "detail": f"{len(evaluated_candidates)} products run through the same rubric"},
+            {"label": "Compare", "detail": f"{len(scored_listings) if on_real_store else len(evaluated_candidates)} products run through the same rubric"},
         ],
+        "diagnostics": diagnostics,
         "ranking": {k: v for k, v in ranking.items() if k != "candidates"},
-        "keep_current": ranking["keep_current"],
+        "keep_current": ranking["keep_current"] if not on_real_store else False,
         "pricier": [public_candidate(a, True) for a in pricier],
         "alternatives": [public_candidate(a) for a in alternatives],
     }

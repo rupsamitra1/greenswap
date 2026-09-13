@@ -100,6 +100,21 @@ store/                  three-page local demo retailer
 supabase/schema.sql     optional database schema and migration
 ```
 
+Start the backend with:
+
+```bash
+cd backend
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+`--host 0.0.0.0` matters. Uvicorn defaults to IPv4 `127.0.0.1` only, but on
+Windows `localhost` resolves to the IPv6 loopback `::1` first — so a browser
+extension calling `http://localhost:8000` gets a connection refused that
+surfaces as a bare "Failed to fetch" with nothing else to go on. The
+extension asks for `127.0.0.1` first for the same reason.
+
+Use `python -m uvicorn`, not the bare `uvicorn` command: pip installs it into a `Scripts` directory that is not on `PATH` by default on Windows. Note also that Windows PowerShell 5.1 has no `&&` operator — chain with `;` or run the two lines separately.
+
 ## Important limits
 
 - The rubric is a transparent product decision for a demo, not a peer-reviewed LCA methodology.

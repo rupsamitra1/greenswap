@@ -36,9 +36,12 @@ def fixture_certified(title):
                 "reason": "Fixture verified for citation enforcement tests."}
     return None
 
+# Tests must not depend on local .env settings; the agent is what we're testing.
+main.AGENT_ENABLED = True
 
 DEPS = {"lookup_certified": fixture_certified,
-        "find_alternatives": main.find_alternatives}
+        "find_alternatives": main.find_alternatives,
+        "live_listings": []}
 
 def run(script):
     return A.run_agent(Stub(script), "dep", "Title: x", DEPS, main.parse_model_json)
