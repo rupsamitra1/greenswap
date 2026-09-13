@@ -264,9 +264,10 @@
     .row-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 
     .eco {
-      display: inline-block; padding: 3px 8px; border-radius: 999px;
+      display: inline-block; padding: 3px 9px; border-radius: 999px;
       background: #e4ede7; color: var(--gs-green-deep);
-      font-size: 11px; font-weight: 700; letter-spacing: .02em;
+      font-size: 11px; font-weight: 700; letter-spacing: .01em;
+      white-space: nowrap;
     }
 
     /* Dedicated price column -- the number is never buried in prose. */
@@ -387,7 +388,7 @@
           }
           <div class="row-why">${escapeHtml(alt.reason)}</div>
           <div class="row-meta">
-            <span class="eco">Eco ${alt.eco_score}</span>
+            <span class="eco">Eco score: ${alt.eco_score}</span>
             ${badge(alt.trust, alt.certification)}
           </div>
           ${
