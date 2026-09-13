@@ -43,10 +43,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "GREENSWAP_SEARCH") {
     fetch(message.url, { credentials: "include" })
       .then(async (res) => {
-        if (!res.ok) throw new Error(`search returned ${res.status}`);
-        sendResponse({ ok: true, html: await res.text() });
+        const html = await res.text();
+        if (!res.ok) {
+          return sendResponse({
+            ok: false,
+            error: `HTTP ${res.status}`,
+            bytes: html.length,
+          });
+        }
+        // Amazon serves a bot check instead of results when it does not like
+        // the request. That arrives as a perfectly good 200, so the only way
+        // to tell is to look at what came back.
+        const blocked =
+          /api-services-support@amazon\.com|Robot Check|Enter the characters you see|captcha/i
+            .test(html.slice(0, 20000));
+        sendResponse({ ok: true, html, bytes: html.length, blocked });
       })
-      .catch((err) => sendResponse({ ok: false, error: err.message }));
+      .catch((err) =>
+        sendResponse({ ok: false, error: err?.message || String(err) })
+      );
     return true;
   }
 

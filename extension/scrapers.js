@@ -93,6 +93,7 @@
   async function searchAmazon(query, limit = 8) {
     const url = `https://www.amazon.com/s?k=${encodeURIComponent(query)}`;
     let doc;
+    let bytes = 0; // kept out of the try so the diagnostics below can see it
     try {
       const res = await new Promise((resolve) => {
         let runtime;
@@ -110,7 +111,20 @@
           resolve({ ok: false, error: err.message });
         }
       });
-      if (!res?.ok) return [];
+      if (!res?.ok) {
+        console.warn(
+          `[GreenSwap] search fetch failed: ${res?.error || "unknown"} (${url})`
+        );
+        return [];
+      }
+      if (res.blocked) {
+        console.warn(
+          "[GreenSwap] Amazon returned a bot check instead of results " +
+            `(${res.bytes} bytes). Live search unavailable on this request.`
+        );
+        return [];
+      }
+      bytes = res.bytes || res.html.length;
       doc = new DOMParser().parseFromString(res.html, "text/html");
     } catch (err) {
       return []; // never let a failed search break the card
@@ -142,6 +156,15 @@
         source: "amazon",
       });
       if (results.length >= limit) break;
+    }
+
+    if (!results.length) {
+      // Distinguish "the page came back but we could not read it" from "the
+      // request never succeeded" -- they need completely different fixes.
+      console.warn(
+        `[GreenSwap] parsed 0 results from ${bytes} bytes; ` +
+          `${cards.length} result blocks seen. Amazon's markup may have changed.`
+      );
     }
     return results;
   }
