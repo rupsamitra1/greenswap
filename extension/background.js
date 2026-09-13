@@ -9,18 +9,30 @@
 // 127.0.0.1, not "localhost". On Windows localhost resolves to the IPv6
 // loopback ::1 first, and a server bound only to IPv4 refuses that -- which
 // surfaces as a bare "Failed to fetch" with nothing else to go on.
+console.log("[GreenSwap] service worker started", chrome.runtime.getManifest().version);
+
 const API_BASES = ["http://127.0.0.1:8000", "http://localhost:8000"];
 
 async function callBackend(path, init) {
-  let lastError;
+  // "Failed to fetch" on its own is useless for diagnosis -- it covers a
+  // refused connection, a blocked private-network request and a dead server
+  // alike. Report what was tried and what each attempt said.
+  const attempts = [];
   for (const base of API_BASES) {
     try {
-      return await fetch(base + path, init);
+      const res = await fetch(base + path, init);
+      console.log(`[GreenSwap] ${base}${path} -> ${res.status}`);
+      return res;
     } catch (err) {
-      lastError = err; // try the next address before giving up
+      attempts.push(`${base}: ${err?.message || err}`);
+      console.warn(`[GreenSwap] ${base}${path} failed:`, err);
     }
   }
-  throw lastError;
+  throw new Error(
+    `backend unreachable — ${attempts.join(" | ")}. ` +
+    `Is the server running? Start it with: ` +
+    `python -m uvicorn main:app --host 0.0.0.0 --port 8000`
+  );
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
