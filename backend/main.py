@@ -199,6 +199,13 @@ ECO_SCORE_MARGIN = 10
 # disposable plastic cups. 60 is the floor of the durable/reusable band.
 MIN_RECOMMEND_SCORE = int(_clean(os.getenv("MIN_RECOMMEND_SCORE")) or 60)
 
+# At or above this the product is already a sound choice, and unless something
+# is CLEARLY_BETTER the honest answer is "keep this one" rather than a list of
+# near-ties. Recommending a swap that barely differs wastes the shopper's
+# attention and cheapens every recommendation that does matter.
+ALREADY_GOOD_SCORE = int(_clean(os.getenv("ALREADY_GOOD_SCORE")) or 65)
+CLEARLY_BETTER = int(_clean(os.getenv("CLEARLY_BETTER")) or 15)
+
 # Which scorer answers when no model is available.
 #
 #   auto   evidence pipeline when it can answer, rules when it cannot
@@ -996,6 +1003,7 @@ def analyze(product: Product):
     scored_listings = []
     better_format: list[dict] = []
     longer_term: list[dict] = []
+    already_good = False
     if on_real_store:
         scored_listings = [
             heuristics.score_listing(listing.model_dump())
@@ -1030,6 +1038,15 @@ def analyze(product: Product):
         mismatched = {item.get("url") for item in longer_term}
         alternatives = [item for item in live_picks
                         if item.get("url") not in mismatched][:3]
+
+        # When the viewed product is already a good choice, "here is one
+        # marginally better thing" is a worse answer than saying so. A shopper
+        # holding a reusable steel bottle does not need to be sold another one.
+        already_good = (
+            original["eco_score"] >= ALREADY_GOOD_SCORE
+            and not any(a["eco_score"] >= original["eco_score"] + CLEARLY_BETTER
+                        for a in alternatives)
+        )
 
         # Nothing reusable qualified. Somebody buying fifty cups for a party
         # cannot use one tumbler, so offer the same format in a better material
@@ -1126,6 +1143,7 @@ def analyze(product: Product):
             {"label": "Compare", "detail": f"{len(scored_listings) if on_real_store else len(evaluated_candidates)} products run through the same rubric"},
         ],
         "diagnostics": diagnostics,
+        "already_good": already_good,
         "longer_term": [
             {
                 "id": item["id"], "name": item["name"], "price": item.get("price"),

@@ -298,6 +298,16 @@
     .empty, .notice { font-size: 13px; line-height: 1.5; }
     .empty { padding: 2px 16px 14px; color: var(--gs-muted); }
     .why { margin-top: 6px; font-size: 12px; opacity: .85; }
+    .keep {
+      margin: 2px 16px 14px; padding: 13px 15px;
+      background: var(--gs-card); border: 1.5px solid var(--gs-green);
+      border-radius: 10px; font-size: 13px; line-height: 1.5;
+      color: var(--gs-muted);
+    }
+    .keep-head {
+      font-size: 14.5px; font-weight: 700; color: var(--gs-green);
+      margin-bottom: 4px;
+    }
     .tier-note {
       margin: 0 16px 8px; font-size: 12px; line-height: 1.45;
       color: var(--gs-muted);
@@ -461,7 +471,16 @@
     // but never volunteered -- the shopper opts in, so a pricier suggestion is
     // something they asked for rather than something we slipped in.
     let body = "";
-    if (alternatives.length) {
+    if (data.already_good && !alternatives.length) {
+      // Telling someone holding a good product to buy another one is how a
+      // recommender loses trust. Say it is fine and stop talking.
+      body = `<div class="keep">
+                <div class="keep-head">Keep this one.</div>
+                We checked what else this store sells and found nothing
+                meaningfully greener at this price. This is already a sound
+                choice.
+              </div>`;
+    } else if (alternatives.length) {
       body = `<div class="rows">${alternatives.map(renderRow).join("")}</div>`;
     } else if (pricier.length) {
       body = `<div class="empty">Nothing greener at or below this price.</div>`;
@@ -731,4 +750,21 @@
   // Nothing from an async entry point should surface as an uncaught rejection
   // in someone else's page.
   start().catch((err) => console.warn("[GreenSwap]", err?.message || err));
+
+  /**
+   * Chrome's back/forward cache restores a page without re-running content
+   * scripts, so navigating back left the previous product's card on screen --
+   * water bottles still showing while you look at cups. Re-analyse when the
+   * page is restored for a different product.
+   */
+  let analysedUrl = location.href;
+  window.addEventListener("pageshow", (event) => {
+    if (!event.persisted || location.href === analysedUrl) return;
+    analysedUrl = location.href;
+    document.getElementById("greenswap-host")?.remove();
+    const fresh = self.GreenSwapScrapers.detect();
+    if (!fresh || !fresh.title) return;
+    Object.assign(product, fresh);
+    start().catch((err) => console.warn("[GreenSwap]", err?.message || err));
+  });
 })();
