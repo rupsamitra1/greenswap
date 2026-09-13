@@ -95,10 +95,20 @@
     let doc;
     try {
       const res = await new Promise((resolve) => {
-        if (!chrome.runtime?.id) return resolve({ ok: false, error: "no context" });
-        chrome.runtime.sendMessage({ type: "GREENSWAP_SEARCH", url }, (r) =>
-          resolve(chrome.runtime.lastError ? { ok: false } : r)
-        );
+        let runtime;
+        try {
+          runtime = globalThis.chrome?.runtime?.id ? globalThis.chrome.runtime : null;
+        } catch (err) {
+          runtime = null;
+        }
+        if (!runtime) return resolve({ ok: false, error: "no extension context" });
+        try {
+          runtime.sendMessage({ type: "GREENSWAP_SEARCH", url }, (r) =>
+            resolve(runtime.lastError ? { ok: false } : r)
+          );
+        } catch (err) {
+          resolve({ ok: false, error: err.message });
+        }
       });
       if (!res?.ok) return [];
       doc = new DOMParser().parseFromString(res.html, "text/html");

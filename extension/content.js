@@ -523,6 +523,15 @@
     });
   }
 
+  /** True only while this script still has a live extension context. */
+  function alive() {
+    try {
+      return Boolean(globalThis.chrome?.runtime?.id);
+    } catch (err) {
+      return false; // touching a dead context can throw outright
+    }
+  }
+
   const product = self.GreenSwapScrapers.detect();
   if (!product || !product.title) return;
 
@@ -535,6 +544,8 @@
    * already inside the retailer's origin with the shopper's session.
    */
   async function start() {
+    if (!alive()) return; // orphaned before we even began
+
     try {
       product.listings = await self.GreenSwapScrapers.findCandidates(product);
       if (product.retailer === "amazon") {
@@ -554,8 +565,8 @@
     // tabs: chrome.runtime disappears underneath them. Awaiting the retailer
     // search widens that window, so check before using it rather than throwing
     // an uncaught error into the page.
-    if (!chrome.runtime?.id) {
-      console.warn("[GreenSwap] extension reloaded; refresh this page");
+    if (!alive()) {
+      console.warn("[GreenSwap] extension was reloaded — refresh this page");
       return;
     }
 
@@ -572,5 +583,7 @@
     );
   }
 
-  start();
+  // Nothing from an async entry point should surface as an uncaught rejection
+  // in someone else's page.
+  start().catch((err) => console.warn("[GreenSwap]", err?.message || err));
 })();
