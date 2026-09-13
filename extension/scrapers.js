@@ -94,8 +94,36 @@
     const url = `https://www.amazon.com/s?k=${encodeURIComponent(query)}`;
     let doc;
     let bytes = 0; // kept out of the try so the diagnostics below can see it
-    try {
-      const res = await new Promise((resolve) => {
+    let res = null;
+
+    /**
+     * Fetch from the page first, the service worker second.
+     *
+     * A content script runs same-origin on amazon.com, so its request carries
+     * the shopper's cookies, a real referer and the browser's own headers --
+     * it looks like the page asking, because it is. The service worker fetches
+     * from the extension's context with none of that, which is the profile
+     * Amazon answers with a bot check. Page CSP does not block this: content
+     * scripts run in an isolated world and their fetches are exempt.
+     *
+     * The worker stays as a fallback for the case the page context refuses.
+     */
+    async function fetchSearchHtml() {
+      if (location.hostname.endsWith("amazon.com")) {
+        try {
+          const res = await fetch(url, {
+            credentials: "include",
+            headers: { Accept: "text/html,application/xhtml+xml" },
+          });
+          if (res.ok) {
+            const html = await res.text();
+            return { ok: true, html, bytes: html.length, via: "page" };
+          }
+        } catch (err) {
+          // fall through to the worker
+        }
+      }
+      return await new Promise((resolve) => {
         let runtime;
         try {
           runtime = globalThis.chrome?.runtime?.id ? globalThis.chrome.runtime : null;
@@ -105,21 +133,29 @@
         if (!runtime) return resolve({ ok: false, error: "no extension context" });
         try {
           runtime.sendMessage({ type: "GREENSWAP_SEARCH", url }, (r) =>
-            resolve(runtime.lastError ? { ok: false } : r)
+            resolve(runtime.lastError ? { ok: false } : { ...r, via: "worker" })
           );
         } catch (err) {
           resolve({ ok: false, error: err.message });
         }
       });
+    }
+
+    try {
+      res = await fetchSearchHtml();
       if (!res?.ok) {
         console.warn(
           `[GreenSwap] search fetch failed: ${res?.error || "unknown"} (${url})`
         );
         return [];
       }
-      if (res.blocked) {
+      const blocked =
+        res.blocked ??
+        /api-services-support@amazon\.com|Robot Check|Enter the characters you see|captcha/i
+          .test(res.html.slice(0, 20000));
+      if (blocked) {
         console.warn(
-          "[GreenSwap] Amazon returned a bot check instead of results " +
+          `[GreenSwap] Amazon returned a bot check via ${res.via} ` +
             `(${res.bytes} bytes). Live search unavailable on this request.`
         );
         return [];
@@ -158,6 +194,9 @@
       if (results.length >= limit) break;
     }
 
+    if (results.length) {
+      console.log(`[GreenSwap] search via ${res.via}: ${results.length} results`);
+    }
     if (!results.length) {
       // Distinguish "the page came back but we could not read it" from "the
       // request never succeeded" -- they need completely different fixes.
