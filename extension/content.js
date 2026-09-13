@@ -546,6 +546,12 @@
   async function start() {
     if (!alive()) return; // orphaned before we even began
 
+    // Announce the build up front. Without this there is no way to tell a
+    // stale extension from a broken one, and they look identical from here.
+    console.log(
+      "[GreenSwap] v" + chrome.runtime.getManifest().version + " active"
+    );
+
     try {
       product.listings = await self.GreenSwapScrapers.findCandidates(product);
       if (product.retailer === "amazon") {
