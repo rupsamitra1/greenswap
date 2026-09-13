@@ -17,7 +17,7 @@ import re
 NEGATIVE = [
     (r"\b(single[- ]use|disposable|one[- ]time use|throw[- ]?away)\b", -22, "single-use"),
     (r"\b(styrofoam|polystyrene|expanded polystyrene|eps foam)\b", -16, "polystyrene"),
-    (r"\b(pet|pete|polypropylene|polyethylene|hdpe|ldpe|pvc)\b", -10, "petroleum plastic"),
+    (r"\b(r?pet|pete|polypropylene|polyethylene|hdpe|ldpe|pvc)\b", -10, "petroleum plastic"),
     (r"\bplastic\b", -8, "plastic"),
     (r"\b(bleach|ammonia|phosphate|paraben|phthalate|triclosan)\b", -10, "harsh chemistry"),
     (r"\b(individually wrapped|shrink[- ]wrapped)\b", -6, "extra packaging"),
@@ -27,7 +27,7 @@ POSITIVE = [
     (r"\b(reusable|refillable|refill)\b", 20, "reusable or refillable"),
     (r"\b(stainless steel|borosilicate|glass|bamboo|cast iron)\b", 16, "durable material"),
     (r"\b(plastic[- ]free|zero[- ]waste|package[- ]free)\b", 16, "plastic-free"),
-    (r"\b(recycled|post[- ]consumer|reclaimed)\b", 14, "recycled content"),
+    (r"\b(recycled|post[- ]consumer|reclaimed|rpet)\b", 14, "recycled content"),
     (r"\b(compostable|biodegradable)\b", 10, "compostable"),
     (r"\b(concentrate|concentrated|tablet|bar form)\b", 10, "concentrated"),
     (r"\b(plant[- ]based|plant[- ]derived)\b", 8, "plant-derived"),
@@ -45,8 +45,9 @@ DURABLE_FLOOR = 55
 # which is how disposable cups end up recommended as the greener swap for
 # disposable cups.
 BULK_COUNT = re.compile(
-    r"\b(\d{2,4})\s*[- ]?(?:pack|pk|count|ct|pcs|pieces|piece)\b|"
-    r"\bset of\s+(\d{2,4})\b"
+    r"\b(\d{2,4})\s*[- /]?(?:pack|pk|count|ct|carton|pcs|pieces|piece)\b|"
+    r"\b(?:pack|pk|count|carton|set)\s+of\s+(\d{2,4})\b|"
+    r"\bnumber of items?\s*:?\s*(\d{2,4})\b"
 )
 BULK_ITEMS = re.compile(
     r"\b(cups?|plates?|bowls?|forks?|spoons?|knives|cutlery|utensils?|straws?|"

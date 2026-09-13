@@ -75,6 +75,29 @@
     return null;
   }
 
+  /** Read Amazon's specification tables, including the "Top highlights"
+   * block. Important material facts often live here instead of in bullets. */
+  function amazonDetailFacts() {
+    const facts = [];
+    const selectors = [
+      "#productOverview_feature_div tr",
+      "#productDetails_techSpec_section_1 tr",
+      "#productDetails_detailBullets_sections1 tr",
+      "#detailBullets_feature_div li",
+    ];
+    for (const row of document.querySelectorAll(selectors.join(","))) {
+      const cells = Array.from(row.querySelectorAll("th, td, span.a-text-bold"))
+        .map((cell) => cell.textContent.trim().replace(/\s+/g, " "))
+        .filter(Boolean);
+      const value = row.querySelector("td")?.textContent.trim().replace(/\s+/g, " ");
+      let fact = value && cells[0] ? `${cells[0]}: ${value}` : row.textContent.trim().replace(/\s+/g, " ");
+      if (fact && fact.length >= 4 && fact.length <= 500 && !facts.includes(fact)) facts.push(fact);
+    }
+    const description = text(document, ["#productDescription", "#aplus_feature_div"]);
+    if (description && description.length <= 1200) facts.push(description.replace(/\s+/g, " "));
+    return facts.slice(0, 14);
+  }
+
   // --- Mock storefront (served at http://localhost:8000/store) --------------
   // Markup here is ours, so the selectors are stable by construction.
   function scrapeMockStore() {
@@ -123,7 +146,9 @@
     )
       .map((el) => el.textContent.trim())
       .filter(Boolean)
-      .slice(0, 8);
+      .slice(0, 8)
+      .concat(amazonDetailFacts())
+      .slice(0, 20);
 
     return {
       title,
@@ -326,6 +351,14 @@
     // product we are replacing: the brand, which is irrelevant to finding an
     // alternative, and the words describing what is wrong with it. "reusable
     // clawsoff plastic disposable cups" returns disposable Clawsoff cups.
+    const fullText = `${product.title || ""} ${(product.bullets || []).join(" ")}`.toLowerCase();
+    if (/\b(water|beverage)\b/.test(fullText) && /\b(bottle|bottled|carton|pack)\b/.test(fullText)) {
+      return ["reusable stainless steel water bottle"];
+    }
+    if (/\b(cups?|tumblers?)\b/.test(fullText)) return ["reusable insulated cup"];
+    if (/\b(straws?)\b/.test(fullText)) return ["reusable stainless steel straws"];
+    if (/\b(plates?|bowls?)\b/.test(fullText)) return ["reusable plates"];
+
     const brandWords = new Set(
       (product.brand || "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
     );

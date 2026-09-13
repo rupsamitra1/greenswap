@@ -523,9 +523,11 @@
       </div>`).join("");
     const warnings = (analysis.warnings || []).slice(0, 3).map((w) => `<div class="warning">• ${escapeHtml(w)}</div>`).join("");
     const evidence = (analysis.evidence || []).slice(0, 4).map((item) => `<div>• ${escapeHtml(item.claim)} <em>(${escapeHtml(item.source)})</em></div>`).join("");
-    // Legacy responses still carry an AI estimate, but the visible score obeys
-    // the structured contract: incomplete evidence is shown as unknown.
-    const scoreDisplay = analysis.overall_score == null ? "—" : analysis.overall_score;
+    // The strict rubric can decline to issue a verified score, but the shopper
+    // still needs a useful screening estimate. Show the bounded fallback and
+    // mark it visibly approximate instead of replacing it with a blank dash.
+    const isEstimate = analysis.overall_score == null && original.eco_score != null;
+    const scoreDisplay = analysis.overall_score ?? original.eco_score ?? "—";
     const pipeline = (data.analysis_steps || []).map((step) => `<div class="step"><strong>${escapeHtml(step.label)}</strong>${escapeHtml(step.detail)}</div>`).join("");
     const affiliateDisclosure = [...alternatives, ...pricier].some((a) => a.affiliate)
       ? `<div class="disclosure"><strong>Affiliate disclosure:</strong> GreenSwap may earn from partner links. Eco scores never receive partner points.${data.ranking?.affiliate_influenced ? " A maximum 3-point partner preference changed the order only inside the disclosed 4-point environmental equivalence band." : " Partner status did not change this ordering."} *Per-use values are estimates.</div>` : "";
@@ -538,7 +540,7 @@
       </div>
 
       <div class="verdict">
-        <div class="verdict-score">${scoreDisplay}<span>/100</span></div>
+        <div class="verdict-score">${isEstimate ? "~" : ""}${scoreDisplay}<span>/100</span></div>
         <div>
           <div class="verdict-label">This item</div>
           <div class="verdict-reason">${escapeHtml(original.reason)}</div>
@@ -551,7 +553,7 @@
       <details class="explain">
         <summary>Why this score?</summary>
         <div class="explain-body">
-          <div class="confidence">${escapeHtml(analysis.confidence || "low")} evidence confidence · ${analysis.confidence_score ?? 0}/100 · ${analysis.coverage_percent ?? 0}% coverage</div>
+          <div class="confidence">${isEstimate ? "Estimated range: ±10 points · " : ""}${escapeHtml(analysis.confidence || "low")} evidence confidence · ${analysis.confidence_score ?? 0}/100 · ${analysis.coverage_percent ?? 0}% coverage</div>
           ${dimensions}
           ${evidence ? `<div class="evidence"><strong>Evidence used</strong>${evidence}</div>` : ""}
           ${warnings}
