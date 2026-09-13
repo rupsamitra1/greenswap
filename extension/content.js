@@ -581,10 +581,18 @@
       return;
     }
 
+    console.log("[GreenSwap] asking backend...");
     chrome.runtime.sendMessage(
       { type: "GREENSWAP_ANALYZE", product },
       (response) => {
-        if (chrome.runtime.lastError || !response) return;
+        if (chrome.runtime.lastError || !response) {
+          console.warn(
+            "[GreenSwap] no reply from the service worker:",
+            chrome.runtime.lastError?.message ||
+              "it was probably terminated mid-request"
+          );
+          return;
+        }
         if (!response.ok) {
           console.warn("[GreenSwap]", response.error);
           return;

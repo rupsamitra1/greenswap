@@ -128,10 +128,15 @@
     async function fetchSearchHtml() {
       if (location.hostname.endsWith("amazon.com")) {
         try {
+          // A hang here would stop the card appearing at all, because the
+          // backend call waits on this. Bound it.
+          const abort = new AbortController();
+          const timer = setTimeout(() => abort.abort(), 8000);
           const res = await fetch(url, {
             credentials: "include",
             headers: { Accept: "text/html,application/xhtml+xml" },
-          });
+            signal: abort.signal,
+          }).finally(() => clearTimeout(timer));
           if (res.ok) {
             const html = await res.text();
             return { ok: true, html, bytes: html.length, via: "page" };
@@ -260,7 +265,18 @@
   async function findCandidates(product) {
     if (product.retailer !== "amazon") return [];
     const queries = greenerQueries(product);
-    const batches = await Promise.all(queries.map((q) => searchAmazon(q, 8)));
+
+    // Whatever happens, the card must still appear. Searching is an
+    // enhancement; it is never allowed to become a precondition.
+    const batches = await Promise.race([
+      Promise.all(queries.map((q) => searchAmazon(q, 8))),
+      new Promise((resolve) =>
+        setTimeout(() => {
+          console.warn("[GreenSwap] live search timed out; showing card anyway");
+          resolve([]);
+        }, 12000)
+      ),
+    ]);
 
     const seen = new Set();
     const merged = [];
