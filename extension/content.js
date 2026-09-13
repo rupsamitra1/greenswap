@@ -186,6 +186,24 @@
     .badge.documented { background: #e4ede7; color: var(--gs-green-deep); border: 1px solid #bfd0c4; }
     .partner { display:inline-block; padding:3px 8px; border-radius:999px; background:#fff2cc; color:#694f00; font-size:11px; font-weight:700; }
 
+    /* --- citations: the evidence behind the badge ----------------------- */
+    .sources { margin-top: 10px; }
+    .sources-label {
+      font-size: 10.5px; font-weight: 700; letter-spacing: .1em;
+      text-transform: uppercase; opacity: .85;
+    }
+    .source {
+      display: block; margin-top: 5px;
+      font-size: 12px; line-height: 1.4;
+      color: #fff; text-decoration: none;
+      border-bottom: 1px solid rgba(255,255,255,.45);
+      width: fit-content; max-width: 100%;
+    }
+    .source:hover { border-bottom-color: #fff; }
+    .source:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    .source .cite-claim { opacity: .92; }
+    .source .cite-src { opacity: .7; }
+
     /* --- section heading ------------------------------------------------ */
     .section {
       display: flex; align-items: baseline; gap: 6px;
@@ -347,6 +365,28 @@
       </div>`;
   }
 
+  /**
+   * Citations are what separate a verified badge from a claim. The backend has
+   * already discarded any the model could not support with a real tool result,
+   * so anything reaching here is checkable -- and we make it clickable so the
+   * shopper can check it.
+   */
+  function renderCitations(citations) {
+    if (!citations || !citations.length) return "";
+    const links = citations
+      .map(
+        (c) => `<a class="source" href="${escapeHtml(c.url)}"
+                   target="_blank" rel="noopener noreferrer">
+                  <span class="cite-claim">${escapeHtml(c.claim)}</span>
+                  <span class="cite-src"> — ${escapeHtml(c.source)}</span>
+                </a>`
+      )
+      .join("");
+    return `<div class="sources">
+              <div class="sources-label">Evidence</div>${links}
+            </div>`;
+  }
+
   function renderRow(alt, index) {
     const best = index === 0;
     return `
@@ -426,6 +466,7 @@
           <div class="verdict-label">This item</div>
           <div class="verdict-reason">${escapeHtml(original.reason)}</div>
           ${badge(original.trust, original.certification)}
+          ${renderCitations(original.citations)}
         </div>
       </div>
 

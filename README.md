@@ -18,6 +18,12 @@ The `/analyze` pipeline is deterministic and inspectable:
 
 The UI exposes the completed stages, dimension points, evidence confidence, missing-data warnings, sticker and per-use pricing, and the scoring method version. This is a screening prototype—not a product-safety certification or a measured life-cycle assessment.
 
+## Verified citations and model providers
+
+**The verified badge is a guarantee, not a label.** On a cache miss the model runs a short research loop (`backend/agent.py`): it may search the certification database, look up a certification programme's official reference, and search the catalog for cheaper greener options. It must then cite a source for anything it claims. Crucially, citations are checked against *recorded tool output* before they reach the shopper -- a model that invents "EPA Safer Choice", or cites a plausible-looking URL it never received, is silently downgraded to an estimate. Telling a model not to fabricate certifications is a request; discarding unsupported claims server-side is a guarantee. Set `GREENSWAP_AGENT=off` to fall back to a single classification call.
+
+The agent runs on either provider unchanged, because both speak the same tool-calling API.
+
 ## Affiliate policy in the demo
 
 Environmental scores never include affiliate status, price, brand, or commission rate.
@@ -42,6 +48,18 @@ Then:
 2. Enable Developer mode.
 3. Choose **Load unpacked** and select `extension/`.
 4. Open <http://localhost:8000/store/>.
+
+### Adding an API key
+
+Either provider works. Gemini exposes an OpenAI-compatible endpoint, so both share one client, one tool-calling loop, and one test suite — only the base URL and model id differ.
+
+**Gemini (recommended — free tier).** Get a key at <https://aistudio.google.com/apikey>, then in `backend/.env`:
+
+    GEMINI_API_KEY=AIza...
+
+The current default model is listed in `backend/.env.example`.
+
+**Azure OpenAI.** Configure the endpoint, key, and deployment fields in `backend/.env`. With both providers present, Gemini wins; force either with `GREENSWAP_PROVIDER=gemini|azure`.
 
 The three reliable demo stories are:
 

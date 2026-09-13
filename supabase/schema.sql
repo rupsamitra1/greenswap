@@ -78,6 +78,9 @@ alter table ai_estimates add column if not exists method_version text;
 alter table ai_estimates add column if not exists model_version text;
 alter table ai_estimates add column if not exists evidence_fingerprint text;
 alter table ai_estimates add column if not exists expires_at timestamptz;
+alter table ai_estimates add column if not exists citations jsonb default '[]'::jsonb;
+alter table ai_estimates add column if not exists verified boolean default false;
+alter table ai_estimates add column if not exists certification text;
 
 -- RLS: enable, then allow public read on the catalog tables.
 -- Without policies, queries return EMPTY results silently rather than erroring.

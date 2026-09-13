@@ -5,7 +5,10 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-from backend.scoring import Evidence
+try:
+    from backend.scoring import Evidence
+except ModuleNotFoundError:
+    from scoring import Evidence
 
 MATERIAL_PATTERNS = {
     "polyethylene terephthalate (PET)": (r"\bpet plastic\b", r"\bpet\b"),
