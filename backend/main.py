@@ -172,6 +172,12 @@ _search_cache: dict[str, list[dict]] = {}
 # An alternative must beat the original by this much to be worth suggesting.
 ECO_SCORE_MARGIN = 10
 
+# ...and must be genuinely green in its own right. A relative margin alone is
+# not enough: when the viewed product scores 15, "beat it by 10" admits a 25,
+# and disposable plastic cups get recommended as the greener swap for
+# disposable plastic cups. 60 is the floor of the durable/reusable band.
+MIN_RECOMMEND_SCORE = int(_clean(os.getenv("MIN_RECOMMEND_SCORE")) or 60)
+
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     from supabase import create_client
@@ -889,9 +895,13 @@ def analyze(product: Product):
     # Say so explicitly rather than letting the promise lapse in silence.
     price_known = bool(original["price"])
 
+    # Both tests must pass: meaningfully better than what they are viewing,
+    # and actually green rather than merely less bad.
+    min_score = max(original["eco_score"] + ECO_SCORE_MARGIN, MIN_RECOMMEND_SCORE)
+
     alternatives = find_alternatives(
         category=category,
-        min_score=original["eco_score"] + ECO_SCORE_MARGIN,
+        min_score=min_score,
         max_price=original["price"] if price_known else None,
     )
 
@@ -907,7 +917,7 @@ def analyze(product: Product):
             continue
         if price_known and price > original["price"]:
             continue
-        if pick["eco_score"] < original["eco_score"] + ECO_SCORE_MARGIN:
+        if pick["eco_score"] < min_score:
             continue
         live_picks.append(pick)
 
@@ -918,7 +928,7 @@ def analyze(product: Product):
     if not live_picks and product.listings:
         live_picks = heuristics.rank_listings(
             [l.model_dump() for l in product.listings],
-            min_score=original["eco_score"] + ECO_SCORE_MARGIN,
+            min_score=min_score,
             max_price=original["price"] if price_known else None,
         )
 
@@ -960,7 +970,7 @@ def analyze(product: Product):
         # Dearer options come from the same real listings.
         dearer = heuristics.rank_listings(
             [l.model_dump() for l in product.listings],
-            min_score=original["eco_score"] + ECO_SCORE_MARGIN,
+            min_score=min_score,
             max_price=None,
             limit=8,
         )
@@ -990,7 +1000,7 @@ def analyze(product: Product):
         pricier = (
             find_pricier(
                 category=category,
-                min_score=original["eco_score"] + ECO_SCORE_MARGIN,
+                min_score=min_score,
                 above_price=original["price"],
             )
             if price_known

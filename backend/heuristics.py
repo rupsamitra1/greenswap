@@ -39,6 +39,21 @@ POSITIVE = [
 SINGLE_USE_CEILING = 30
 DURABLE_FLOOR = 55
 
+# Nobody buys fifty cups to keep. A bulk pack of drinkware or tableware is
+# disposable whether or not the listing uses the word, and without this a
+# "100-Pack Plastic Cups" reads as merely "plastic" and scores mid-range --
+# which is how disposable cups end up recommended as the greener swap for
+# disposable cups.
+BULK_COUNT = re.compile(
+    r"\b(\d{2,4})\s*[- ]?(?:pack|pk|count|ct|pcs|pieces|piece)\b|"
+    r"\bset of\s+(\d{2,4})\b"
+)
+BULK_ITEMS = re.compile(
+    r"\b(cups?|plates?|bowls?|forks?|spoons?|knives|cutlery|utensils?|straws?|"
+    r"napkins?|bottles?|bags?|wraps?|liners?|towels?|wipes?)\b"
+)
+BULK_THRESHOLD = 20
+
 
 def analyze_text(text: str) -> dict:
     """Score a product from its listing text alone.
@@ -63,7 +78,18 @@ def analyze_text(text: str) -> dict:
             found_positive.append(label)
             materials.append(label)
 
-    single_use = "single-use" in found_negative
+    # Infer disposability from quantity when the wording does not state it.
+    bulk = BULK_COUNT.search(lowered)
+    if bulk and BULK_ITEMS.search(lowered):
+        count = int(next(g for g in bulk.groups() if g))
+        if count >= BULK_THRESHOLD:
+            score -= 22
+            if "single-use" not in found_negative:
+                found_negative.append("sold in disposable quantities")
+                materials.append("single-use")
+
+    single_use = ("single-use" in found_negative
+                  or "sold in disposable quantities" in found_negative)
     durable = "durable material" in found_positive or "reusable or refillable" in found_positive
 
     if single_use:
