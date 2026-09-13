@@ -107,10 +107,14 @@
     }
 
     const results = [];
+    // Amazon lists the same item twice when it is also a sponsored slot;
+    // without this the duplicates eat the candidate budget.
+    const seenAsins = new Set();
     const cards = doc.querySelectorAll('[data-component-type="s-search-result"]');
     for (const card of cards) {
       const asin = card.getAttribute("data-asin");
-      if (!asin) continue;
+      if (!asin || seenAsins.has(asin)) continue;
+      seenAsins.add(asin);
 
       const name = text(card, ["h2 span", "h2 a span", ".a-size-medium"]);
       if (!name) continue;

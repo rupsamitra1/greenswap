@@ -867,6 +867,7 @@ def analyze(product: Product):
     # actually saw. The price ceiling and the score margin are applied HERE,
     # in code: the model proposes, but it cannot talk its way past the promise
     # the product is built on.
+    pricier: list[dict] = []
     live_picks = []
     for pick in (estimate.get("picks") if not certified else None) or []:
         price = pick.get("price")
@@ -888,11 +889,42 @@ def analyze(product: Product):
             max_price=original["price"] if price_known else None,
         )
 
-    if live_picks:
-        # Real listings come first. The seeded catalog is demo data -- those
-        # products do not exist on the store the shopper is looking at, so
-        # letting them outrank a real buyable listing would be recommending
-        # something they cannot purchase.
+    on_real_store = bool(product.retailer) and product.retailer != "mockstore"
+
+    if on_real_store and not product.listings:
+        # The retailer search came back empty -- its markup may have changed.
+        # Falling back to the seeded catalog here is what put invented dish
+        # soap on an Amazon page: those products cannot be bought, and a wrong
+        # answer is worse than none.
+        alternatives = []
+        print(f"[GreenSwap] no live listings for {product.retailer}; "
+              "returning no alternatives rather than catalog demo data")
+
+    if product.listings:
+        # We searched the real store, so answer from it alone. The seeded
+        # catalog is demo data: those products do not exist on Amazon, and
+        # padding a real result set with invented ones is worse than returning
+        # fewer answers. Only the mock store, which has no live search, still
+        # falls back to the catalog.
+        live_picks.sort(key=lambda a: (-a["eco_score"], a.get("price") or 0))
+        alternatives = live_picks[:3]
+
+        # Dearer options come from the same real listings.
+        dearer = heuristics.rank_listings(
+            [l.model_dump() for l in product.listings],
+            min_score=original["eco_score"] + ECO_SCORE_MARGIN,
+            max_price=None,
+            limit=8,
+        )
+        chosen = {a.get("url") for a in alternatives}
+        pricier = [
+            dict(d, extra_cost=round(d["price"] - original["price"], 2))
+            for d in dearer
+            if d.get("url") not in chosen
+            and price_known
+            and d["price"] > original["price"]
+        ][:3]
+    elif live_picks:
         live_picks.sort(key=lambda a: (-a["eco_score"], a.get("price") or 0))
         seen = {p["name"].lower() for p in live_picks}
         alternatives = (
@@ -903,15 +935,19 @@ def analyze(product: Product):
     # them behind an explicit opt-in whether or not cheaper ones exist. The
     # unprompted answer stays "same price or cheaper"; the shopper decides
     # whether to look further.
-    pricier = (
-        find_pricier(
-            category=category,
-            min_score=original["eco_score"] + ECO_SCORE_MARGIN,
-            above_price=original["price"],
+    #
+    # On a real store this was already filled from real listings above; the
+    # catalog is only consulted when there was no live search to draw on.
+    if not product.listings:
+        pricier = (
+            find_pricier(
+                category=category,
+                min_score=original["eco_score"] + ECO_SCORE_MARGIN,
+                above_price=original["price"],
+            )
+            if price_known
+            else []
         )
-        if price_known
-        else []
-    )
 
     return {
         "original": original,
