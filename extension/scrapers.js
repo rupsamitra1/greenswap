@@ -107,7 +107,38 @@
    * Returns real listings with real product URLs, so a recommendation can
    * link straight to the item instead of to a search page.
    */
+  const SEARCH_TTL_MS = 10 * 60 * 1000;
+
+  /** Session-scoped cache, so reloading a page does not refetch the search. */
+  function cachedSearch(query) {
+    try {
+      const raw = sessionStorage.getItem("greenswap:" + query);
+      if (!raw) return null;
+      const { at, listings } = JSON.parse(raw);
+      return Date.now() - at < SEARCH_TTL_MS ? listings : null;
+    } catch (err) {
+      return null; // storage can be unavailable; never fatal
+    }
+  }
+
+  function rememberSearch(query, listings) {
+    try {
+      sessionStorage.setItem(
+        "greenswap:" + query,
+        JSON.stringify({ at: Date.now(), listings })
+      );
+    } catch (err) {
+      /* quota or disabled storage -- not worth failing over */
+    }
+  }
+
   async function searchAmazon(query, limit = 8) {
+    const cached = cachedSearch(query);
+    if (cached) {
+      console.log(`[GreenSwap] search (cached): ${cached.length} results`);
+      return cached;
+    }
+
     const url = `https://www.amazon.com/s?k=${encodeURIComponent(query)}`;
     let doc;
     let bytes = 0; // kept out of the try so the diagnostics below can see it
@@ -228,6 +259,7 @@
 
     if (results.length) {
       console.log(`[GreenSwap] search via ${res.via}: ${results.length} results`);
+      rememberSearch(query, results);
     }
     if (!results.length) {
       // Distinguish "the page came back but we could not read it" from "the
@@ -254,7 +286,10 @@
       .slice(0, 4)
       .join(" ");
     if (!base) return [];
-    return [`refillable ${base}`, `plastic free reusable ${base}`];
+    // One query, not two. Each search is a multi-megabyte download, and firing
+    // two on every product page both doubled the wait and made Amazon throttle
+    // us. "reusable" is the single most productive term.
+    return [`reusable ${base}`];
   }
 
   const STOPWORDS = new Set([
@@ -274,7 +309,7 @@
         setTimeout(() => {
           console.warn("[GreenSwap] live search timed out; showing card anyway");
           resolve([]);
-        }, 12000)
+        }, 15000)
       ),
     ]);
 
