@@ -532,7 +532,16 @@
   async function start() {
     try {
       product.listings = await self.GreenSwapScrapers.findCandidates(product);
+      if (product.retailer === "amazon") {
+        // Visible diagnostic: if this is 0 the retailer's search markup has
+        // moved, and recommendations will silently fall back to the catalog.
+        console.log(
+          `[GreenSwap] ${product.listings.length} live listings found`,
+          product.listings.map((l) => `${l.name.slice(0, 40)} $${l.price}`)
+        );
+      }
     } catch (err) {
+      console.warn("[GreenSwap] live search failed:", err.message);
       product.listings = []; // a failed search must not cost us the card
     }
 
