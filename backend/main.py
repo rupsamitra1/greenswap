@@ -1040,6 +1040,24 @@ def analyze(product: Product):
             max_price=original["price"] if price_known else None,
         )
 
+    # Why there was nothing to show matters as much as a result: "we could not
+    # read this page" and "we checked twelve and none were both greener and no
+    # dearer" call for completely different reactions from a shopper.
+    considered = len(product.listings)
+    diagnostics = {
+        "listings_considered": considered,
+        "min_score": min_score,
+        "viewed_score": original["eco_score"],
+        "too_low_scoring": 0,
+        "too_expensive": 0,
+    }
+    for listing in product.listings:
+        scored = heuristics.score_listing(listing.model_dump())
+        if scored["eco_score"] < min_score:
+            diagnostics["too_low_scoring"] += 1
+        if price_known and (scored.get("price") or 0) > original["price"]:
+            diagnostics["too_expensive"] += 1
+
     on_real_store = bool(product.retailer) and product.retailer != "mockstore"
 
     # The browser scrape is preferred: it is free and shows what the shopper
@@ -1120,6 +1138,7 @@ def analyze(product: Product):
         "category": category,
         "cached": cached,
         "price_known": price_known,
+        "diagnostics": diagnostics,
         "pricier": [
             {
                 "id": a["id"],

@@ -293,6 +293,7 @@
     /* --- states --------------------------------------------------------- */
     .empty, .notice { font-size: 13px; line-height: 1.5; }
     .empty { padding: 2px 16px 14px; color: var(--gs-muted); }
+    .why { margin-top: 6px; font-size: 12px; opacity: .85; }
     .notice {
       margin: 0 16px 10px; padding: 10px 12px;
       background: #f0e6d8; color: #6b4a1c;
@@ -434,8 +435,24 @@
     } else if (pricier.length) {
       body = `<div class="empty">Nothing greener at or below this price.</div>`;
     } else {
+      // Say which kind of nothing this is. "We could not read this page" and
+      // "we checked twelve and none qualified" call for different reactions.
+      const d = data.diagnostics || {};
+      let why;
+      if (!d.listings_considered) {
+        why = `We couldn't read other listings from this page, so there is
+               nothing to compare against yet.`;
+      } else {
+        const bits = [];
+        if (d.too_low_scoring) bits.push(`${d.too_low_scoring} weren't meaningfully greener`);
+        if (d.too_expensive) bits.push(`${d.too_expensive} cost more`);
+        why = `We checked ${d.listings_considered} other listing${
+          d.listings_considered === 1 ? "" : "s"
+        } on this page${bits.length ? ` — ${bits.join(", ")}` : ""}.`;
+      }
       body = `<div class="empty">No greener option at or below this price yet.
-                We never suggest an alternative that costs more.</div>`;
+                We never suggest an alternative that costs more.
+                <div class="why">${why}</div></div>`;
     }
 
     if (pricier.length) {
