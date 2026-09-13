@@ -65,6 +65,15 @@ BULK_ITEMS = re.compile(
 BULK_THRESHOLD = 20
 
 
+# "Plastic alternative" and "plastic-free" contain the word plastic while
+# meaning its opposite. Penalising them for saying so scored a plant-based cup
+# below a paper one, which is backwards.
+NOT_PLASTIC = re.compile(
+    r"\bplastic[- ]free\b|\bplastic alternative\b|\balternative to plastic\b|"
+    r"\bno plastic\b|\bplastic[- ]free\b"
+)
+
+
 def analyze_text(text: str) -> dict:
     """Score a product from its listing text alone.
 
@@ -76,7 +85,11 @@ def analyze_text(text: str) -> dict:
     score = 50
     found_negative, found_positive, materials = [], [], []
 
+    plastic_is_the_opposite = bool(NOT_PLASTIC.search(lowered))
+
     for pattern, weight, label in NEGATIVE:
+        if label == "plastic" and plastic_is_the_opposite:
+            continue  # the listing is describing what it avoids
         if re.search(pattern, lowered):
             score += weight
             found_negative.append(label)

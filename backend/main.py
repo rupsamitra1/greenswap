@@ -1057,12 +1057,20 @@ def analyze(product: Product):
         # or pretend it is equivalent, offer it framed for what it is -- a
         # change of habit that replaces repeat purchases.
         if not alternatives:
+            # No price ceiling here on purpose. A pack of cheap plastic cups is
+            # often cheaper than anything greener in the same format, so
+            # applying the ceiling meant the one honest like-for-like answer --
+            # the compostable or plant-based version of the same thing -- could
+            # never be shown. This tier is a separate, clearly-labelled section
+            # with the extra cost stated, not a silent upsell.
             better_format = heuristics.better_same_format(
                 [listing.model_dump() for listing in product.listings
                  if heuristics.same_product_type(product.title, listing.name)],
                 viewed_score=original["eco_score"],
-                max_price=original["price"] if price_known else None,
+                max_price=None,
             )
+            better_format.sort(key=lambda item: (item.get("price") or 0,
+                                                 -item["eco_score"]))
 
         dearer = heuristics.rank_listings(
             [listing.model_dump() for listing in product.listings
@@ -1160,8 +1168,12 @@ def analyze(product: Product):
                 "eco_score": item["eco_score"], "trust": item["trust"],
                 "certification": None, "reason": item["reason"],
                 "url": buy_url(item, product.retailer),
-                "savings": (round(original["price"] - (item.get("price") or 0), 2)
-                            if price_known else None),
+                **(
+                    {"extra_cost": round((item.get("price") or 0) - original["price"], 2)}
+                    if price_known and (item.get("price") or 0) > original["price"]
+                    else {"savings": (round(original["price"] - (item.get("price") or 0), 2)
+                                      if price_known else None)}
+                ),
             }
             for item in better_format
         ],

@@ -526,7 +526,9 @@
     if (betterFormat.length) {
       body += `
         <div class="section">Same format, better material</div>
-        <div class="tier-note">Still single-use, but a lower-impact material.</div>
+        <div class="tier-note">Still single-use, but a lower-impact material.
+          These can cost more than what you're viewing — the extra is shown
+          on each.</div>
         <div class="rows">${betterFormat
           .map((alt, i, all) => renderRow(alt, i, all, { tagBest: false }))
           .join("")}</div>`;

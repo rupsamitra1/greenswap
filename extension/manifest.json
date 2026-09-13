@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GreenSwap",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "description": "Explains evidence-backed environmental scores and suggests meaningfully better options at the same price or cheaper.",
   "permissions": [
     "storage"
