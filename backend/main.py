@@ -31,6 +31,7 @@ from collections import deque
 from pathlib import Path
 
 import agent as agent_mod
+import evaluation as evidence_eval
 import heuristics
 import identification
 import pricing
@@ -179,6 +180,20 @@ ECO_SCORE_MARGIN = 10
 # and disposable plastic cups get recommended as the greener swap for
 # disposable plastic cups. 60 is the floor of the durable/reusable band.
 MIN_RECOMMEND_SCORE = int(_clean(os.getenv("MIN_RECOMMEND_SCORE")) or 60)
+
+# Which scorer answers when no model is available.
+#
+#   auto   evidence pipeline when it can answer, rules when it cannot
+#   rules  keyword signals only
+#
+# There is deliberately no evidence-only mode. That pipeline scores from
+# documented facts and declines otherwise, and a retail listing documents
+# almost nothing -- its catalog matches on SKU or model number, which scraped
+# listings do not carry. Evidence-only would therefore answer "insufficient"
+# for essentially every real product, and a mode that always says nothing is
+# worse than no mode. "auto" uses evidence the moment real product data exists
+# and stays useful until then.
+SCORER = (_clean(os.getenv("GREENSWAP_SCORER")) or "auto").lower()
 
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -551,6 +566,54 @@ is established elsewhere, from a database, and claiming one here would be a
 false verification."""
 
 
+def evidence_estimate(product: Product) -> dict | None:
+    """Score from documented facts, or return None when there are too few.
+
+    Returning None is the point: this pipeline declines to guess, which is
+    right for a verdict and useless as the only answer.
+    """
+    try:
+        result = evidence_eval.evaluate_product({
+            "title": product.title,
+            "name": product.title,
+            "brand": product.brand,
+            "url": product.url,
+            "price": product.price,
+            "bullets": product.bullets,
+            "category": guess_category(
+                f"{product.title} {' '.join(product.bullets)}"
+            ),
+        })
+    except Exception as exc:
+        print(f"[GreenSwap] evidence scorer failed: {exc}")
+        return None
+
+    analysis = result.get("analysis") or {}
+    score = analysis.get("overall_score")
+    if score is None:
+        return None
+
+    dimensions = [d for d in analysis.get("dimensions", []) if d.get("assessment")]
+    detail = ", ".join(
+        f"{d['dimension'].replace('_', ' ')}: {d['assessment'].replace('_', ' ')}"
+        for d in dimensions[:3]
+    )
+    return {
+        "category": analysis.get("category") or guess_category(product.title),
+        "materials": [d["dimension"].replace("_", " ") for d in dimensions][:6] or ["documented"],
+        "citations": [],
+        "verified": False,
+        "source": "evidence",
+        "eco_score": int(score),
+        "reason": (
+            f"Scored from documented facts ({analysis.get('confidence', 'low')} "
+            f"confidence, {analysis.get('coverage_percent', 0)}% evidence coverage)"
+            + (f" — {detail}." if detail else ".")
+        ),
+        "analysis": analysis,
+    }
+
+
 def offline_estimate(product: Product, note: str | None = None) -> dict:
     """Honest fallback when the model cannot answer.
 
@@ -680,9 +743,18 @@ def call_llm(listing: str) -> dict:
         raise
 
 
+def choose_offline_scorer(product: Product, note: str | None = None) -> dict:
+    """Evidence first when configured, rules when evidence cannot answer."""
+    if SCORER == "auto":
+        scored = evidence_estimate(product)
+        if scored is not None:
+            return scored
+    return offline_estimate(product, note=note)
+
+
 def estimate_with_ai(product: Product, deadline: float | None = None) -> dict:
     if not llm_client:
-        return offline_estimate(product)
+        return choose_offline_scorer(product)
 
     def remaining() -> float:
         return 1e9 if deadline is None else deadline - time.monotonic()
@@ -690,7 +762,7 @@ def estimate_with_ai(product: Product, deadline: float | None = None) -> dict:
     # An agent run is several sequential calls; do not start one we cannot
     # finish inside the budget.
     if remaining() < 12:
-        return offline_estimate(product, note=(
+        return choose_offline_scorer(product, note=(
             "Scored from the listing text — the AI was too slow to answer "
             "within the time a page should wait."
         ))
@@ -727,7 +799,7 @@ def estimate_with_ai(product: Product, deadline: float | None = None) -> dict:
                 print(f"[GreenSwap] agent failed, using single call: {exc}")
 
         if remaining() < 3:
-            return offline_estimate(product, note=(
+            return choose_offline_scorer(product, note=(
                 "Scored from the listing text — the AI was too slow to answer "
                 "within the time a page should wait."
             ))
@@ -753,7 +825,7 @@ def estimate_with_ai(product: Product, deadline: float | None = None) -> dict:
         print(f"[GreenSwap] model call failed: {llm_status['last_error']}")
         message = str(exc)
         if any(k in message for k in ("429", "RESOURCE_EXHAUSTED", "rate limit")):
-            return offline_estimate(product, note=(
+            return choose_offline_scorer(product, note=(
                 "Scored from the product name alone — the AI quota is "
                 "temporarily exhausted, so materials could not be inferred."
             ))
@@ -909,9 +981,10 @@ def analyze(product: Product):
         # Say which process actually produced this. Calling a rules-based score
         # an "AI estimate" would be a small lie in the one place the product
         # cannot afford one.
-        estimated_by = (
-            "heuristic" if estimate.get("source") == "heuristic" else "ai_estimated"
-        )
+        estimated_by = {
+            "heuristic": "heuristic",
+            "evidence": "evidence",
+        }.get(estimate.get("source"), "ai_estimated")
         original = {
             "name": product.title,
             "brand": product.brand or "",
