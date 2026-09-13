@@ -1031,6 +1031,10 @@ def analyze(product: Product):
         # A single durable item is not a like-for-like swap for a bulk pack.
         # It is still the better environmental answer, so it moves to its own
         # framing rather than being dropped or sold as "save $1.00".
+        # A single durable item cannot cover a bulk need, so it is framed as a
+        # change of habit rather than a like-for-like swap. A six-pack of
+        # reusable bags can cover sixty disposable ones -- it gets washed and
+        # used again -- so that stays a straight recommendation.
         longer_term = [
             item for item in live_picks
             if heuristics.quantity_mismatch(product.title, item["name"])
@@ -1158,7 +1162,12 @@ def analyze(product: Product):
                 "eco_score": item["eco_score"], "trust": item["trust"],
                 "certification": None, "reason": item["reason"],
                 "url": buy_url(item, product.retailer),
-                "savings": None,
+                **(
+                    {"extra_cost": round((item.get("price") or 0) - original["price"], 2)}
+                    if price_known and (item.get("price") or 0) > original["price"]
+                    else {"savings": (round(original["price"] - (item.get("price") or 0), 2)
+                                      if price_known else None)}
+                ),
             }
             for item in longer_term
         ],

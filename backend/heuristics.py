@@ -54,15 +54,16 @@ PLANT_SIGNAL = re.compile(r"\b(plant[- ]based|plant[- ]derived|pla)\b")
 # which is how disposable cups end up recommended as the greener swap for
 # disposable cups.
 BULK_COUNT = re.compile(
-    r"\b(\d{2,4})\s*[- /]?(?:pack|pk|count|ct|carton|pcs|pieces|piece)\b|"
-    r"\b(?:pack|pk|count|carton|set)\s+of\s+(\d{2,4})\b|"
-    r"\bnumber of items?\s*:?\s*(\d{2,4})\b"
+    r"\b(\d{1,4})\s*[- /]?(?:pack|pk|count|ct|carton|pcs|pieces|piece)\b|"
+    r"\b(?:pack|pk|count|carton|set)\s+of\s+(\d{1,4})\b|"
+    r"\bnumber of items?\s*:?\s*(\d{1,4})\b"
 )
 BULK_ITEMS = re.compile(
     r"\b(cups?|plates?|bowls?|forks?|spoons?|knives|cutlery|utensils?|straws?|"
     r"napkins?|bottles?|bags?|wraps?|liners?|towels?|wipes?)\b"
 )
 BULK_THRESHOLD = 20
+SINGLE_ITEM_MAX = 2  # one or two items cannot cover a bulk need
 
 
 # "Plastic alternative" and "plastic-free" contain the word plastic while
@@ -239,7 +240,11 @@ def quantity_mismatch(viewed: str, candidate: str) -> bool:
     if not viewed_count or viewed_count < BULK_THRESHOLD:
         return False
     candidate_count = pack_count(candidate) or 1
-    return candidate_count < BULK_THRESHOLD
+    # What matters is whether the swap can cover the need, not the raw ratio.
+    # Fifty cups for a party cannot be served by one tumbler. Sixty disposable
+    # freezer bags can be covered by six reusable ones, because they are washed
+    # and used again. So only a single item or a pair counts as a mismatch.
+    return candidate_count <= SINGLE_ITEM_MAX
 
 
 def better_same_format(listings: list[dict], viewed_score: int,
