@@ -247,6 +247,19 @@
       font-size: 14px; font-weight: 600; line-height: 1.3;
       color: var(--gs-ink);
     }
+    a.row-name { text-decoration: none; }
+    a.row-name:hover { text-decoration: underline; }
+    a.row-name:focus-visible { outline: 2px solid var(--gs-green); outline-offset: 2px; }
+    .row-go {
+      display: inline-block; margin-top: 8px;
+      padding: 6px 12px; border-radius: 999px;
+      background: var(--gs-green); color: #fff;
+      font-size: 12px; font-weight: 600; text-decoration: none;
+      transition: background-color 140ms ease;
+    }
+    .row-go:hover { background: var(--gs-green-deep); }
+    .row-go:focus-visible { outline: 2px solid var(--gs-green); outline-offset: 2px; }
+    .row-go::after { content: " 92"; }
     .row-why { font-size: 12.5px; line-height: 1.45; color: var(--gs-muted); margin-top: 4px; }
     .row-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 
@@ -365,12 +378,24 @@
       <div class="row ${best ? "best" : ""}">
         ${best ? `<span class="tag">Best swap</span>` : ""}
         <div class="row-main">
-          <div class="row-name">${escapeHtml(alt.name)}</div>
+          ${
+            alt.url
+              ? `<a class="row-name" href="${escapeHtml(alt.url)}"
+                     target="_blank" rel="noopener noreferrer"
+                  >${escapeHtml(alt.name)}</a>`
+              : `<div class="row-name">${escapeHtml(alt.name)}</div>`
+          }
           <div class="row-why">${escapeHtml(alt.reason)}</div>
           <div class="row-meta">
             <span class="eco">Eco ${alt.eco_score}</span>
             ${badge(alt.trust, alt.certification)}
           </div>
+          ${
+            alt.url
+              ? `<a class="row-go" href="${escapeHtml(alt.url)}"
+                     target="_blank" rel="noopener noreferrer">Find it</a>`
+              : ""
+          }
         </div>
         ${priceCell(alt)}
       </div>`;
@@ -380,21 +405,26 @@
     const { original, alternatives } = data;
     const pricier = data.pricier || [];
 
-    let body;
+    // Cheaper-or-equal options are the answer. Dearer ones are always available
+    // but never volunteered -- the shopper opts in, so a pricier suggestion is
+    // something they asked for rather than something we slipped in.
+    let body = "";
     if (alternatives.length) {
       body = `<div class="rows">${alternatives.map(renderRow).join("")}</div>`;
     } else if (pricier.length) {
-      // Dearer options stay behind an explicit opt-in. The shopper chooses to
-      // spend more; we never decide it for them.
-      body = `
-        <div class="empty">Nothing greener at or below this price.</div>
-        <button class="reveal" aria-expanded="false">
-          Show ${pricier.length} that cost more
-        </button>
-        <div class="pricier rows" hidden>${pricier.map(renderRow).join("")}</div>`;
+      body = `<div class="empty">Nothing greener at or below this price.</div>`;
     } else {
       body = `<div class="empty">No greener option at or below this price yet.
                 We never suggest an alternative that costs more.</div>`;
+    }
+
+    if (pricier.length) {
+      const label = alternatives.length
+        ? `See ${pricier.length} greener option${pricier.length > 1 ? "s" : ""} that cost more`
+        : `Show ${pricier.length} that cost more`;
+      body += `
+        <button class="reveal" aria-expanded="false">${label}</button>
+        <div class="pricier rows" hidden>${pricier.map(renderRow).join("")}</div>`;
     }
 
     // Showing the current price alongside makes the comparison concrete

@@ -23,7 +23,11 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
+import urllib.parse
+import types
+from collections import deque
 from pathlib import Path
 
 import agent as agent_mod
@@ -115,12 +119,27 @@ GEMINI_API_KEY = _clean(os.getenv("GEMINI_API_KEY"))
 GEMINI_MODEL = _clean(os.getenv("GEMINI_MODEL")) or "gemini-3.6-flash"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
+# Gemini's free tier allows 5 requests per minute per model, and one agent run
+# spends 3-4 of them. Left alone, browsing two products in a minute exhausts
+# the quota and every later request 429s. Waiting is far better than failing.
+LLM_RPM = int(_clean(os.getenv("LLM_RPM")) or 5)
+
+# ...but a shopper is waiting on the other end of this. Queueing behind the
+# quota is only worth doing briefly; past this we answer with the heuristic
+# rather than leave a product page hanging.
+LLM_MAX_WAIT = float(_clean(os.getenv("LLM_MAX_WAIT")) or 8)
+
 # Surfaced by /health and /selftest so a misconfigured key is visible rather
 # than silently degrading into the offline fallback.
 AGENT_ENABLED = (_clean(os.getenv("GREENSWAP_AGENT")) or "on").lower() != "off"
 
 llm_status: dict = {"calls": 0, "failures": 0, "last_error": None, "json_mode": True,
                        "agent_runs": 0, "agent_failures": 0}
+
+# Affiliate tag, appended to outbound links when set. This is the hook for the
+# primary revenue stream in the business model; without it the links still work,
+# they just earn nothing.
+AMAZON_AFFILIATE_TAG = _clean(os.getenv("AMAZON_AFFILIATE_TAG"))
 
 # An alternative must beat the original by this much to be worth suggesting.
 ECO_SCORE_MARGIN = 10
@@ -130,6 +149,80 @@ if SUPABASE_URL and SUPABASE_KEY:
     from supabase import create_client
 
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def _retry_delay_seconds(message: str) -> float:
+    """Google states exactly how long to wait; obey it rather than guessing."""
+    for pattern in (r"'retryDelay':\s*'([\d.]+)s'", r"retry in ([\d.]+)s"):
+        found = re.search(pattern, message)
+        if found:
+            return min(float(found.group(1)) + 0.5, 30.0)
+    return 5.0
+
+
+_rate_lock = threading.Lock()
+_recent_calls: deque = deque()
+
+
+class RateBudgetExceeded(RuntimeError):
+    """No quota slot within the time a shopper should be asked to wait."""
+
+
+def _throttle(budget: float | None = None) -> None:
+    """Wait for a slot in the per-minute allowance, but not indefinitely."""
+    deadline = time.monotonic() + (LLM_MAX_WAIT if budget is None else budget)
+    while True:
+        with _rate_lock:
+            now = time.monotonic()
+            while _recent_calls and now - _recent_calls[0] > 60:
+                _recent_calls.popleft()
+            if len(_recent_calls) < LLM_RPM:
+                _recent_calls.append(now)
+                return
+            wait = 60 - (now - _recent_calls[0]) + 0.25
+
+        if time.monotonic() + wait > deadline:
+            raise RateBudgetExceeded(
+                f"rate limit: no slot within {LLM_MAX_WAIT:.0f}s "
+                f"({LLM_RPM}/min allowance)"
+            )
+        print(f"[GreenSwap] rate limit reached, waiting {wait:.1f}s")
+        time.sleep(max(wait, 0.1))
+
+
+class ThrottledClient:
+    """Wraps the provider client so every call is paced and 429-aware.
+
+    The agent loop and the single-call path both go through here, so the
+    allowance is shared rather than each path having its own idea of it.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.chat = types.SimpleNamespace(
+            completions=types.SimpleNamespace(create=self._create)
+        )
+
+    def _create(self, **kwargs):
+        last = None
+        for attempt in range(3):
+            _throttle()
+            try:
+                return self._inner.chat.completions.create(**kwargs)
+            except Exception as exc:
+                message = str(exc)
+                if "429" not in message and "RESOURCE_EXHAUSTED" not in message:
+                    raise
+                last = exc
+                delay = _retry_delay_seconds(message)
+                if delay > LLM_MAX_WAIT:
+                    raise RateBudgetExceeded(
+                        f"rate limit: provider asked for {delay:.0f}s"
+                    ) from exc
+                print(f"[GreenSwap] 429; retrying in {delay:.1f}s "
+                      f"(attempt {attempt + 1}/3)")
+                time.sleep(delay)
+        raise last
+
 
 llm_client = None
 MODEL_NAME = None
@@ -148,6 +241,7 @@ if PROVIDER == "gemini" or (_want_gemini and PROVIDER != "azure"):
             timeout=REQUEST_TIMEOUT,
             max_retries=2,
         )
+        llm_client = ThrottledClient(llm_client)
         MODEL_NAME = GEMINI_MODEL
         ACTIVE_PROVIDER = "gemini"
 elif _want_azure:
@@ -160,6 +254,7 @@ elif _want_azure:
         timeout=REQUEST_TIMEOUT,
         max_retries=2,
     )
+    llm_client = ThrottledClient(llm_client)
     MODEL_NAME = AZURE_DEPLOYMENT
     ACTIVE_PROVIDER = "azure"
 
@@ -381,8 +476,12 @@ is established elsewhere, from a database, and claiming one here would be a
 false verification."""
 
 
-def offline_estimate(product: Product) -> dict:
-    """Honest fallback when no LLM is configured."""
+def offline_estimate(product: Product, note: str | None = None) -> dict:
+    """Honest fallback when the model cannot answer.
+
+    The reason matters: "not configured" and "rate limited" look identical to a
+    shopper but mean completely different things to whoever is running this.
+    """
     category = guess_category(f"{product.title} {' '.join(product.bullets)}")
     return {
         "category": category,
@@ -390,7 +489,7 @@ def offline_estimate(product: Product) -> dict:
         "citations": [],
         "verified": False,
         "eco_score": 40,
-        "reason": (
+        "reason": note or (
             "Scored cautiously from the product name alone — AI analysis "
             "is not configured, so materials could not be inferred."
         ),
@@ -554,6 +653,12 @@ def estimate_with_ai(product: Product) -> dict:
         llm_status["failures"] += 1
         llm_status["last_error"] = f"{type(exc).__name__}: {exc}"
         print(f"[GreenSwap] model call failed: {llm_status['last_error']}")
+        message = str(exc)
+        if any(k in message for k in ("429", "RESOURCE_EXHAUSTED", "rate limit")):
+            return offline_estimate(product, note=(
+                "Scored from the product name alone — the AI quota is "
+                "temporarily exhausted, so materials could not be inferred."
+            ))
         return offline_estimate(product)
 
 
@@ -621,6 +726,30 @@ def find_pricier(category: str, min_score: int, above_price: float):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+def buy_url(row: dict, retailer: str | None = None) -> str:
+    """A link the shopper can actually act on.
+
+    We link to a retailer search for the product rather than a product page,
+    because the catalog holds names rather than listings. It is honest -- the
+    shopper lands on real results for that exact item -- and it is where the
+    affiliate tag attaches when there is one.
+    """
+    if row.get("url"):
+        return row["url"]
+
+    terms = " ".join(filter(None, [row.get("brand"), row.get("name")]))
+    query = urllib.parse.quote_plus(terms)
+    if (retailer or "").lower() == "walmart":
+        return f"https://www.walmart.com/search?q={query}"
+    if (retailer or "").lower() == "target":
+        return f"https://www.target.com/s?searchTerm={query}"
+
+    url = f"https://www.amazon.com/s?k={query}"
+    if AMAZON_AFFILIATE_TAG:
+        url += f"&tag={urllib.parse.quote_plus(AMAZON_AFFILIATE_TAG)}"
+    return url
+
+
 def _program_citation(certification: str | None) -> list[dict]:
     """Turn a certification name into a link the shopper can check."""
     program = agent_mod.CERTIFICATION_PROGRAMS.get(str(certification or "").lower())
@@ -688,16 +817,17 @@ def analyze(product: Product):
         max_price=original["price"] if price_known else None,
     )
 
-    # Only when nothing qualifies at or below the price do we look higher, and
-    # even then the card keeps these behind an explicit opt-in. The default
-    # answer stays "same price or cheaper, or nothing at all".
+    # Greener options above the price are always computed, but the card keeps
+    # them behind an explicit opt-in whether or not cheaper ones exist. The
+    # unprompted answer stays "same price or cheaper"; the shopper decides
+    # whether to look further.
     pricier = (
         find_pricier(
             category=category,
             min_score=original["eco_score"] + ECO_SCORE_MARGIN,
             above_price=original["price"],
         )
-        if price_known and not alternatives
+        if price_known
         else []
     )
 
@@ -716,6 +846,7 @@ def analyze(product: Product):
                 "trust": a.get("trust", "ai_estimated"),
                 "certification": a.get("certification"),
                 "reason": a.get("reason", ""),
+                "url": buy_url(a, product.retailer),
                 "extra_cost": round((a.get("price") or 0) - original["price"], 2),
             }
             for a in pricier
@@ -731,6 +862,7 @@ def analyze(product: Product):
                 "certification": a.get("certification"),
                 "reason": a.get("reason", ""),
                 "emoji": a.get("emoji", "🌿"),
+                "url": buy_url(a, product.retailer),
                 "savings": (
                     round(original["price"] - (a.get("price") or 0), 2)
                     if price_known
