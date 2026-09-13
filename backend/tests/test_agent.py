@@ -117,7 +117,7 @@ except RuntimeError as e:
 # --- 6. end to end through /analyze, agent failure falls back ----------------
 from fastapi.testclient import TestClient
 main._memory_cache.clear()
-main.azure_client = Stub([
+main.llm_client = Stub([
     msg(tool_calls=[tool_call("1", "search_certifications", {"product_name": "Ultra Clean Dish Soap, 40oz"})]),
     msg(content=json.dumps({
         "category": "cleaning", "materials": ["synthetic surfactants"], "eco_score": 22,
@@ -129,15 +129,15 @@ d = TestClient(main.app).post("/analyze", json={
 check("/analyze uses the agent",
       d["original"]["eco_score"] == 22 and d["original"]["trust"] == "ai_estimated",
       f"score={d['original']['eco_score']} alts={len(d['alternatives'])} "
-      f"agent_runs={main.azure_status['agent_runs']}")
+      f"agent_runs={main.llm_status['agent_runs']}")
 
 main._memory_cache.clear()
-main.azure_client = Stub([Exception("agent blew up"),  # agent path dies
+main.llm_client = Stub([Exception("agent blew up"),  # agent path dies
                           msg(content='{"category":"cleaning","eco_score":30,"reason":"fallback"}')])
 d = TestClient(main.app).post("/analyze", json={"title": "Some Soap", "price": 4.49}).json()
 check("agent failure falls back to single call",
-      d["original"]["eco_score"] == 30 and main.azure_status["agent_failures"] >= 1,
-      f"score={d['original']['eco_score']} failures={main.azure_status['agent_failures']}")
+      d["original"]["eco_score"] == 30 and main.llm_status["agent_failures"] >= 1,
+      f"score={d['original']['eco_score']} failures={main.llm_status['agent_failures']}")
 
 print()
 print(f"{sum(results)}/{len(results)} passed")

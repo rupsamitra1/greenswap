@@ -34,6 +34,8 @@ Three design decisions carry the product:
 
 **The verified badge is a guarantee, not a label.** On a cache miss the model runs a short research loop (`backend/agent.py`): it may search the certification database, look up a certification programme's official reference, and search the catalog for cheaper greener options. It must then cite a source for anything it claims. Crucially, citations are checked against *recorded tool output* before they reach the shopper -- a model that invents "EPA Safer Choice", or cites a plausible-looking URL it never received, is silently downgraded to an estimate. Telling a model not to fabricate certifications is a request; discarding unsupported claims server-side is a guarantee. Set `GREENSWAP_AGENT=off` to fall back to a single classification call.
 
+The agent runs on either provider unchanged, because both speak the same tool-calling API.
+
 
 **Certified before estimated.** The database is consulted first, and the model runs only when a product has no published materials. Every result the user sees is labeled `✓ Verified` or `~ AI estimated`, so nobody has to take an opaque eco-score on faith. This is the answer to the 55% of consumers who distrust sustainability claims.
 
@@ -49,11 +51,11 @@ When the price cannot be scraped at all, the ceiling cannot be enforced, so the 
 
 ```bash
 cd backend
-python tests/test_azure.py   # single-call paths: parsing, retries, error handling
+python tests/test_llm.py     # single-call paths: parsing, retries, error handling
 python tests/test_agent.py   # the research loop and its citation enforcement
 ```
 
-Both stub the Azure client, so they need no key and no network.
+Both stub the model client, so they need no key, no network, and no provider.
 
 ## Setup
 
@@ -63,15 +65,25 @@ Both stub the Azure client, so they need no key and no network.
 cd backend && pip install -r requirements.txt
 ```
 
-### Adding the Azure key
+### Adding an API key
 
-`backend/.env` already exists with the fields laid out. Paste three values in and restart:
+Either provider works. Gemini exposes an OpenAI-compatible endpoint, so both share one client, one tool-calling loop, and one test suite — only the base URL and model id differ.
+
+**Gemini (recommended — free tier).** Get a key at <https://aistudio.google.com/apikey>, then in `backend/.env`:
+
+    GEMINI_API_KEY=AIza...
+
+That is the whole setup. `GEMINI_MODEL` defaults to `gemini-2.0-flash`.
+
+**Azure OpenAI.** Three values instead:
 
     AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
     AZURE_OPENAI_API_KEY=<the long key string>
     AZURE_OPENAI_DEPLOYMENT=<your deployment name>
 
-`AZURE_OPENAI_DEPLOYMENT` is the **deployment name you chose in Azure AI Foundry**, not the model name. That mismatch is the single most common failure, and it surfaces as a 404.
+`AZURE_OPENAI_DEPLOYMENT` is the **deployment name you chose in Azure AI Foundry**, not the model name. That mismatch is the most common failure, and it surfaces as a 404.
+
+With both present, Gemini wins; force either with `GREENSWAP_PROVIDER=gemini|azure`.
 
 The server reads `.env` once at startup, so **restart it after editing**.
 
@@ -81,7 +93,7 @@ Then confirm it actually works:
 curl http://localhost:8000/selftest
 ```
 
-That makes one real model call and reports the outcome. `"ok": true` comes back with the model's scoring of a sample product. `"ok": false` comes back with the actual error and a hint naming the likely cause. This endpoint exists because every failure path in `/analyze` degrades gracefully into the offline estimator — which is right for shoppers, and useless when you are trying to find out whether your key works. `/health` also reports `azure_calls`, `azure_failures`, and `azure_last_error`.
+That makes one real model call and reports the outcome. `"ok": true` comes back with the model's scoring of a sample product. `"ok": false` comes back with the actual error and a hint naming the likely cause, written for whichever provider is active. This endpoint exists because every failure path in `/analyze` degrades gracefully into the offline estimator — which is right for shoppers, and useless when you are trying to find out whether your key works. `/health` reports the active provider, the model, and the running call/failure counts.
 
 `.env` is gitignored. Never commit it.
 

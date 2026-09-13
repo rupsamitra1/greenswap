@@ -5,12 +5,12 @@ Pipeline for /analyze:
 1. Look the product up in certified_products (Supabase).
    -> If found, trust = "certified" (ground truth from EPA Safer Choice / ENERGY STAR).
 2. If not found, check the ai_estimates cache before spending a single token.
-3. On a cache miss, ask Azure OpenAI to estimate materials + eco score,
+3. On a cache miss, ask the model (Gemini or Azure OpenAI) to estimate,
    then write the result back to the cache. trust = "ai_estimated".
 4. Return greener alternatives in the same category that cost NO MORE than
    the original -- the "same price or cheaper" promise is a hard filter.
 
-Everything degrades gracefully: with no Supabase and no Azure credentials the
+Everything degrades gracefully: with no Supabase and no model credentials the
 service still answers from a built-in catalog and a keyword heuristic, so the
 demo never depends on the network.
 
@@ -44,7 +44,7 @@ def _ensure_env_file() -> None:
     env, template = here / ".env", here / ".env.example"
     if not env.exists() and template.exists():
         env.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
-        print(f"[GreenSwap] Created {env} from .env.example - add your Azure key there.")
+        print(f"[GreenSwap] Created {env} from .env.example - add your API key there.")
 
 
 _ensure_env_file()
@@ -102,13 +102,24 @@ if AZURE_ENDPOINT:
         AZURE_ENDPOINT += "/"
 
 # A hung call must not hold a product page waiting.
-REQUEST_TIMEOUT = float(_clean(os.getenv("AZURE_OPENAI_TIMEOUT")) or 20)
+REQUEST_TIMEOUT = float(
+    _clean(os.getenv("LLM_TIMEOUT")) or _clean(os.getenv("AZURE_OPENAI_TIMEOUT")) or 20
+)
+
+# --- provider -------------------------------------------------------------
+# Gemini exposes an OpenAI-compatible endpoint, so the same client, the same
+# tool-calling loop and the same tests serve both providers. Only the base URL
+# and the model id differ.
+PROVIDER = (_clean(os.getenv("GREENSWAP_PROVIDER")) or "auto").lower()
+GEMINI_API_KEY = _clean(os.getenv("GEMINI_API_KEY"))
+GEMINI_MODEL = _clean(os.getenv("GEMINI_MODEL")) or "gemini-2.0-flash"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 # Surfaced by /health and /selftest so a misconfigured key is visible rather
 # than silently degrading into the offline fallback.
 AGENT_ENABLED = (_clean(os.getenv("GREENSWAP_AGENT")) or "on").lower() != "off"
 
-azure_status: dict = {"calls": 0, "failures": 0, "last_error": None, "json_mode": True,
+llm_status: dict = {"calls": 0, "failures": 0, "last_error": None, "json_mode": True,
                        "agent_runs": 0, "agent_failures": 0}
 
 # An alternative must beat the original by this much to be worth suggesting.
@@ -120,17 +131,37 @@ if SUPABASE_URL and SUPABASE_KEY:
 
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-azure_client = None
-if AZURE_ENDPOINT and AZURE_API_KEY:
+llm_client = None
+MODEL_NAME = None
+ACTIVE_PROVIDER = None
+
+_want_gemini = PROVIDER in ("auto", "gemini") and GEMINI_API_KEY
+_want_azure = PROVIDER in ("auto", "azure") and AZURE_ENDPOINT and AZURE_API_KEY
+
+if PROVIDER == "gemini" or (_want_gemini and PROVIDER != "azure"):
+    if GEMINI_API_KEY:
+        from openai import OpenAI
+
+        llm_client = OpenAI(
+            api_key=GEMINI_API_KEY,
+            base_url=GEMINI_BASE_URL,
+            timeout=REQUEST_TIMEOUT,
+            max_retries=2,
+        )
+        MODEL_NAME = GEMINI_MODEL
+        ACTIVE_PROVIDER = "gemini"
+elif _want_azure:
     from openai import AzureOpenAI
 
-    azure_client = AzureOpenAI(
+    llm_client = AzureOpenAI(
         azure_endpoint=AZURE_ENDPOINT,
         api_key=AZURE_API_KEY,
         api_version=AZURE_API_VERSION,
         timeout=REQUEST_TIMEOUT,
         max_retries=2,
     )
+    MODEL_NAME = AZURE_DEPLOYMENT
+    ACTIVE_PROVIDER = "azure"
 
 # Used only when Supabase is not configured, so the cache still works locally.
 _memory_cache: dict[str, dict] = {}
@@ -433,9 +464,9 @@ def normalize_estimate(raw: dict, product_title: str) -> dict:
     }
 
 
-def _azure_create(listing: str, json_mode: bool) -> dict:
+def _llm_create(listing: str, json_mode: bool) -> dict:
     kwargs = {
-        "model": AZURE_DEPLOYMENT,  # on Azure this is the DEPLOYMENT name
+        "model": MODEL_NAME,  # Azure: deployment name. Gemini: model id.
         "messages": [
             {"role": "system", "content": ESTIMATE_PROMPT},
             {"role": "user", "content": listing},
@@ -444,11 +475,11 @@ def _azure_create(listing: str, json_mode: bool) -> dict:
     }
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
-    resp = azure_client.chat.completions.create(**kwargs)
+    resp = llm_client.chat.completions.create(**kwargs)
     return parse_model_json(resp.choices[0].message.content)
 
 
-def call_azure(listing: str) -> dict:
+def call_llm(listing: str) -> dict:
     """One estimate, surviving the two failures actually worth surviving.
 
     Older deployments reject response_format outright. Rather than making
@@ -457,32 +488,32 @@ def call_azure(listing: str) -> dict:
     backed-off retry.
     """
     try:
-        return _azure_create(listing, json_mode=azure_status["json_mode"])
+        return _llm_create(listing, json_mode=llm_status["json_mode"])
     except Exception as exc:
         message = str(exc).lower()
-        if azure_status["json_mode"] and any(
+        if llm_status["json_mode"] and any(
             k in message for k in ("response_format", "json_object", "json mode")
         ):
             # Remember, so every later call skips the doomed attempt.
-            azure_status["json_mode"] = False
-            return _azure_create(listing, json_mode=False)
+            llm_status["json_mode"] = False
+            return _llm_create(listing, json_mode=False)
         if "429" in message or "rate limit" in message:
             time.sleep(2)
-            return _azure_create(listing, json_mode=azure_status["json_mode"])
+            return _llm_create(listing, json_mode=llm_status["json_mode"])
         raise
 
 
 def estimate_with_ai(product: Product) -> dict:
-    if not azure_client:
+    if not llm_client:
         return offline_estimate(product)
 
-    azure_status["calls"] += 1
+    llm_status["calls"] += 1
     try:
         listing = build_listing(product)
         if AGENT_ENABLED:
             try:
                 raw = agent_mod.run_agent(
-                    azure_client, AZURE_DEPLOYMENT, listing,
+                    llm_client, MODEL_NAME, listing,
                     {"lookup_certified": lookup_certified,
                      "find_alternatives": find_alternatives},
                     parse_model_json,
@@ -494,23 +525,23 @@ def estimate_with_ai(product: Product) -> dict:
                 result["verified"] = bool(raw.get("verified"))
                 result["certification"] = raw.get("certification")
                 result["agent_steps"] = len(raw.get("tool_calls", []))
-                azure_status["agent_runs"] += 1
-                azure_status["last_error"] = None
+                llm_status["agent_runs"] += 1
+                llm_status["last_error"] = None
                 return result
             except Exception as exc:
                 # A failed research loop should cost the shopper nothing beyond
                 # the citations -- fall back to the single-call estimate.
-                azure_status["agent_failures"] += 1
-                azure_status["last_error"] = f"agent: {type(exc).__name__}: {exc}"
+                llm_status["agent_failures"] += 1
+                llm_status["last_error"] = f"agent: {type(exc).__name__}: {exc}"
                 print(f"[GreenSwap] agent failed, using single call: {exc}")
 
-        raw = call_azure(listing)
+        raw = call_llm(listing)
         result = normalize_estimate(raw, product.title)
-        azure_status["last_error"] = None
+        llm_status["last_error"] = None
         return result
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-        azure_status["failures"] += 1
-        azure_status["last_error"] = f"bad response: {exc}"
+        llm_status["failures"] += 1
+        llm_status["last_error"] = f"bad response: {exc}"
         return {
             "category": guess_category(product.title),
             "materials": ["unknown"],
@@ -520,9 +551,9 @@ def estimate_with_ai(product: Product) -> dict:
     except Exception as exc:
         # Network/auth/quota trouble must never take the page down -- but it
         # must not vanish either, or a bad key looks exactly like a working one.
-        azure_status["failures"] += 1
-        azure_status["last_error"] = f"{type(exc).__name__}: {exc}"
-        print(f"[GreenSwap] Azure call failed: {azure_status['last_error']}")
+        llm_status["failures"] += 1
+        llm_status["last_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[GreenSwap] model call failed: {llm_status['last_error']}")
         return offline_estimate(product)
 
 
@@ -716,11 +747,14 @@ def health():
     return {
         "ok": True,
         "supabase": bool(supabase),
-        "azure_openai": bool(azure_client),
-        "azure_deployment": AZURE_DEPLOYMENT if azure_client else None,
-        "azure_calls": azure_status["calls"],
-        "azure_failures": azure_status["failures"],
-        "azure_last_error": azure_status["last_error"],
+        "provider": ACTIVE_PROVIDER,
+        "model": MODEL_NAME,
+        "llm_ready": bool(llm_client),
+        "agent_enabled": AGENT_ENABLED,
+        "llm_calls": llm_status["calls"],
+        "llm_failures": llm_status["failures"],
+        "agent_runs": llm_status["agent_runs"],
+        "last_error": llm_status["last_error"],
         "cached_estimates": len(_memory_cache) if not supabase else None,
     }
 
@@ -733,20 +767,16 @@ def selftest():
     which is right for shoppers and useless for setup. Hit this after dropping
     in a key to find out whether it actually works.
     """
-    if not azure_client:
-        missing = [
-            name
-            for name, value in (
-                ("AZURE_OPENAI_ENDPOINT", AZURE_ENDPOINT),
-                ("AZURE_OPENAI_API_KEY", AZURE_API_KEY),
-            )
-            if not value
-        ]
+    if not llm_client:
         return {
             "ok": False,
-            "reason": "Azure client not configured",
-            "missing_env": missing,
-            "hint": "Create backend/.env from .env.example, then restart the server.",
+            "reason": "No model provider configured",
+            "set_one_of": {
+                "gemini": ["GEMINI_API_KEY"],
+                "azure": ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY"],
+            },
+            "hint": "Put a key in backend/.env, then RESTART the server "
+                    "(.env is read once at startup).",
         }
 
     sample = Product(
@@ -757,35 +787,42 @@ def selftest():
     )
     started = time.perf_counter()
     try:
-        raw = call_azure(build_listing(sample))
+        raw = call_llm(build_listing(sample))
         return {
             "ok": True,
-            "deployment": AZURE_DEPLOYMENT,
-            "api_version": AZURE_API_VERSION,
-            "json_mode": azure_status["json_mode"],
+            "provider": ACTIVE_PROVIDER,
+            "model": MODEL_NAME,
+            "json_mode": llm_status["json_mode"],
             "latency_ms": round((time.perf_counter() - started) * 1000),
             "raw": raw,
             "normalized": normalize_estimate(raw, sample.title),
         }
     except Exception as exc:
         message = str(exc)
-        hint = "Unexpected error — check the endpoint and deployment name."
         low = message.lower()
+        gemini = ACTIVE_PROVIDER == "gemini"
+        hint = "Unexpected error - check the key and model name."
         if "401" in message or "access denied" in low or "unauthorized" in low:
-            hint = "Key rejected. Check AZURE_OPENAI_API_KEY matches this resource."
+            hint = ("Key rejected. Check GEMINI_API_KEY was copied whole from "
+                    "Google AI Studio." if gemini else
+                    "Key rejected. Check AZURE_OPENAI_API_KEY matches this resource.")
+        elif "400" in message and "api key" in low:
+            hint = "Key malformed. Re-copy it; Google AI Studio keys start with 'AIza'."
         elif "404" in message or "not found" in low:
-            hint = (
-                "Deployment not found. AZURE_OPENAI_DEPLOYMENT must be the "
-                "deployment name you chose in Azure AI Foundry, not the model name."
-            )
+            hint = (f"Model '{MODEL_NAME}' not found. Try GEMINI_MODEL=gemini-2.0-flash."
+                    if gemini else
+                    "Deployment not found. AZURE_OPENAI_DEPLOYMENT must be the "
+                    "deployment NAME you chose in Azure AI Foundry, not the model name.")
         elif "429" in message:
-            hint = "Rate limited or out of quota for this deployment."
+            hint = ("Rate limited. Gemini's free tier has per-minute limits; "
+                    "wait a moment and retry." if gemini else
+                    "Rate limited or out of quota for this deployment.")
         elif "getaddrinfo" in low or "connect" in low:
-            hint = "Endpoint unreachable. Check AZURE_OPENAI_ENDPOINT."
+            hint = "Endpoint unreachable - check your network."
         return {
             "ok": False,
             "error": f"{type(exc).__name__}: {message}",
             "hint": hint,
-            "deployment": AZURE_DEPLOYMENT,
-            "endpoint_set": bool(AZURE_ENDPOINT),
+            "provider": ACTIVE_PROVIDER,
+            "model": MODEL_NAME,
         }

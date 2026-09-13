@@ -1,9 +1,11 @@
-"""Exercise every Azure code path with a stub client -- no key, no network.
+"""Exercise every model code path with a stub client -- no key, no network.
+
+Provider-agnostic: Gemini and Azure share this client and this loop.
 
 This is the part of "first contact" that can be de-risked in advance:
 everything except the socket.
 
-    python tests/test_azure.py
+    python tests/test_llm.py
 """
 import pathlib
 import sys
@@ -20,7 +22,7 @@ def reply(content):
 
 
 class Stub:
-    """Mimics azure_client.chat.completions.create."""
+    """Mimics llm_client.chat.completions.create."""
 
     def __init__(self, script):
         self.script = list(script)
@@ -45,18 +47,18 @@ results = []
 
 
 def run(name, script, expect):
-    main.azure_client = Stub(script)
+    main.llm_client = Stub(script)
     main.AGENT_ENABLED = False  # this file covers the single-call path
-    main.azure_status.update(
+    main.llm_status.update(
         {"calls": 0, "failures": 0, "last_error": None, "json_mode": True}
     )
     result = main.estimate_with_ai(SAMPLE)
-    stub = main.azure_client
+    stub = main.llm_client
     ok = expect(result, stub)
     results.append(ok)
     print(f"{'PASS' if ok else 'FAIL'}  {name}")
     print(f"        score={result['eco_score']} cat={result['category']} "
-          f"calls={len(stub.calls)} err={main.azure_status['last_error']}")
+          f"calls={len(stub.calls)} err={main.llm_status['last_error']}")
 
 
 run("clean JSON", [GOOD],
@@ -95,15 +97,15 @@ run("empty reason -> filled in",
 
 run("total garbage -> cautious default, error recorded",
     ["I'm sorry, I can't help with that."],
-    lambda r, s: r["eco_score"] == 40 and main.azure_status["last_error"] is not None)
+    lambda r, s: r["eco_score"] == 40 and main.llm_status["last_error"] is not None)
 
 run("401 auth error -> offline fallback, error recorded",
     [Exception("Error code: 401 - Access denied due to invalid subscription key")],
-    lambda r, s: r["eco_score"] == 40 and "401" in main.azure_status["last_error"])
+    lambda r, s: r["eco_score"] == 40 and "401" in main.llm_status["last_error"])
 
 run("404 deployment error -> offline fallback",
     [Exception("Error code: 404 - DeploymentNotFound")],
-    lambda r, s: r["eco_score"] == 40 and "404" in main.azure_status["last_error"])
+    lambda r, s: r["eco_score"] == 40 and "404" in main.llm_status["last_error"])
 
 print()
 print(f"{sum(results)}/{len(results)} passed")
