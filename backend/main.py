@@ -31,6 +31,7 @@ from collections import deque
 from pathlib import Path
 
 import agent as agent_mod
+import heuristics
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -514,14 +515,17 @@ def offline_estimate(product: Product, note: str | None = None) -> dict:
     The reason matters: "not configured" and "rate limited" look identical to a
     shopper but mean completely different things to whoever is running this.
     """
-    category = guess_category(f"{product.title} {' '.join(product.bullets)}")
+    text = f"{product.title} {' '.join(product.bullets)}"
+    category = guess_category(text)
+    rules = heuristics.analyze_text(text)
     return {
         "category": category,
-        "materials": ["unknown"],
+        "materials": rules["materials"],
         "citations": [],
         "verified": False,
-        "eco_score": 40,
-        "reason": note or (
+        "source": "heuristic",
+        "eco_score": rules["eco_score"],
+        "reason": note or heuristics.explain(rules) if rules["confident"] else note or (
             "Scored cautiously from the product name alone — AI analysis "
             "is not configured, so materials could not be inferred."
         ),
@@ -658,6 +662,7 @@ def estimate_with_ai(product: Product) -> dict:
                 result["certification"] = raw.get("certification")
                 result["agent_steps"] = len(raw.get("tool_calls", []))
                 result["picks"] = raw.get("picks", [])
+                result["source"] = "agent"
                 llm_status["agent_runs"] += 1
                 llm_status["last_error"] = None
                 return result
@@ -670,6 +675,7 @@ def estimate_with_ai(product: Product) -> dict:
 
         raw = call_llm(listing)
         result = normalize_estimate(raw, product.title)
+        result["source"] = "model"
         llm_status["last_error"] = None
         return result
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
@@ -827,12 +833,18 @@ def analyze(product: Product):
         # agent.verify_claims has already discarded any certification a tool did
         # not actually return, so trusting it here is safe.
         verified = bool(estimate.get("verified"))
+        # Say which process actually produced this. Calling a rules-based score
+        # an "AI estimate" would be a small lie in the one place the product
+        # cannot afford one.
+        estimated_by = (
+            "heuristic" if estimate.get("source") == "heuristic" else "ai_estimated"
+        )
         original = {
             "name": product.title,
             "brand": product.brand or "",
             "price": product.price or 0,
             "eco_score": estimate["eco_score"],
-            "trust": "certified" if verified else "ai_estimated",
+            "trust": "certified" if verified else estimated_by,
             "certification": estimate.get("certification"),
             "materials": estimate.get("materials", []),
             "reason": estimate["reason"],
@@ -865,6 +877,16 @@ def analyze(product: Product):
         if pick["eco_score"] < original["eco_score"] + ECO_SCORE_MARGIN:
             continue
         live_picks.append(pick)
+
+    # No model answered, but the browser still scraped real listings. Rank them
+    # with the same rubric so the shopper gets genuine, buyable alternatives
+    # instead of a seeded catalog -- degraded, but still the actual product.
+    if not live_picks and estimate.get("source") == "heuristic" and product.listings:
+        live_picks = heuristics.rank_listings(
+            [l.model_dump() for l in product.listings],
+            min_score=original["eco_score"] + ECO_SCORE_MARGIN,
+            max_price=original["price"] if price_known else None,
+        )
 
     if live_picks:
         # Real listings come first. The seeded catalog is demo data -- those

@@ -99,13 +99,17 @@ run("total garbage -> cautious default, error recorded",
     ["I'm sorry, I can't help with that."],
     lambda r, s: r["eco_score"] == 40 and main.llm_status["last_error"] is not None)
 
-run("401 auth error -> offline fallback, error recorded",
+# The offline fallback now reads the listing with the rules engine rather than
+# returning a flat 40, so these assert a sensible score for single-use plastic
+# rather than a fixed number.
+run("401 auth error -> rules-based fallback, error recorded",
     [Exception("Error code: 401 - Access denied due to invalid subscription key")],
-    lambda r, s: r["eco_score"] == 40 and "401" in main.llm_status["last_error"])
+    lambda r, s: r["eco_score"] <= 30 and "401" in main.llm_status["last_error"]
+    and "single-use" in r["materials"])
 
-run("404 deployment error -> offline fallback",
+run("404 deployment error -> rules-based fallback",
     [Exception("Error code: 404 - DeploymentNotFound")],
-    lambda r, s: r["eco_score"] == 40 and "404" in main.llm_status["last_error"])
+    lambda r, s: r["eco_score"] <= 30 and "404" in main.llm_status["last_error"])
 
 print()
 print(f"{sum(results)}/{len(results)} passed")

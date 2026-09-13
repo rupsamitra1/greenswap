@@ -176,10 +176,11 @@
     }
     /* On the green verdict block */
     .verdict .badge.certified { background: #fff; color: var(--gs-green-deep); }
-    .verdict .badge.ai_estimated { background: rgba(255,255,255,.16); color: #fff; }
+    .verdict .badge.ai_estimated,
+    .verdict .badge.heuristic { background: rgba(255,255,255,.16); color: #fff; }
     /* On cream rows */
     .badge.certified { background: var(--gs-green); color: #fff; }
-    .badge.ai_estimated {
+    .badge.ai_estimated, .badge.heuristic {
       background: transparent; color: var(--gs-muted);
       border: 1px solid var(--gs-line);
     }
@@ -325,10 +326,14 @@
   }
 
   function badge(trust, certification) {
-    const label =
-      trust === "certified"
-        ? `✓ ${certification || "Certified"}`
-        : "~ AI estimate";
+    // Three distinct provenances, said plainly. "Rule-based" is not AI, and
+    // claiming otherwise would undercut the point of labelling at all.
+    const labels = {
+      certified: `✓ ${certification || "Certified"}`,
+      ai_estimated: "~ AI estimate",
+      heuristic: "~ Rule-based estimate",
+    };
+    const label = labels[trust] || labels.ai_estimated;
     return `<span class="badge ${trust}">${escapeHtml(label)}</span>`;
   }
 
