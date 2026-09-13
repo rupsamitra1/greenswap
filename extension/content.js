@@ -294,6 +294,8 @@
     .empty, .notice { font-size: 13px; line-height: 1.5; }
     .empty { padding: 2px 16px 14px; color: var(--gs-muted); }
     .why { margin-top: 6px; font-size: 12px; opacity: .85; }
+    .near-label { margin-top: 7px; font-weight: 600; opacity: .9; }
+    .near { margin-top: 3px; font-size: 11.5px; opacity: .8; }
     .notice {
       margin: 0 16px 10px; padding: 10px 12px;
       background: #f0e6d8; color: #6b4a1c;
@@ -446,9 +448,21 @@
         const bits = [];
         if (d.too_low_scoring) bits.push(`${d.too_low_scoring} weren't meaningfully greener`);
         if (d.too_expensive) bits.push(`${d.too_expensive} cost more`);
-        why = `We checked ${d.listings_considered} other listing${
-          d.listings_considered === 1 ? "" : "s"
-        } on this page${bits.length ? ` — ${bits.join(", ")}` : ""}.`;
+        const closest = (d.closest || [])
+          .map(
+            (c) =>
+              `<div class="near">${escapeHtml(c.name.slice(0, 60))} — scored ${
+                c.eco_score
+              }${c.price ? `, $${Number(c.price).toFixed(2)}` : ""}</div>`
+          )
+          .join("");
+        why =
+          `We checked ${d.listings_considered} other listing${
+            d.listings_considered === 1 ? "" : "s"
+          } on this page${bits.length ? ` — ${bits.join(", ")}` : ""}.` +
+          (closest
+            ? `<div class="near-label">Closest we found (needs ${d.min_score}+):</div>${closest}`
+            : "");
       }
       body = `<div class="empty">No greener option at or below this price yet.
                 We never suggest an alternative that costs more.

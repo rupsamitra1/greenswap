@@ -1054,12 +1054,21 @@ def analyze(product: Product):
         "too_low_scoring": 0,
         "too_expensive": 0,
     }
+    near_misses = []
     for listing in product.listings:
         scored = heuristics.score_listing(listing.model_dump())
         if scored["eco_score"] < min_score:
             diagnostics["too_low_scoring"] += 1
         if price_known and (scored.get("price") or 0) > original["price"]:
             diagnostics["too_expensive"] += 1
+        near_misses.append((scored["eco_score"], scored["name"], scored.get("price")))
+
+    # Naming the best thing we rejected explains the verdict far better than a
+    # count, and shows whether the search found the right sort of product at all.
+    near_misses.sort(reverse=True)
+    diagnostics["closest"] = [
+        {"name": n, "eco_score": sc, "price": pr} for sc, n, pr in near_misses[:2]
+    ]
 
     on_real_store = bool(product.retailer) and product.retailer != "mockstore"
 
