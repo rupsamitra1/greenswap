@@ -6,7 +6,22 @@
  * host_permissions, so all backend traffic is routed through here.
  */
 
-const API_BASE = "http://localhost:8000";
+// 127.0.0.1, not "localhost". On Windows localhost resolves to the IPv6
+// loopback ::1 first, and a server bound only to IPv4 refuses that -- which
+// surfaces as a bare "Failed to fetch" with nothing else to go on.
+const API_BASES = ["http://127.0.0.1:8000", "http://localhost:8000"];
+
+async function callBackend(path, init) {
+  let lastError;
+  for (const base of API_BASES) {
+    try {
+      return await fetch(base + path, init);
+    } catch (err) {
+      lastError = err; // try the next address before giving up
+    }
+  }
+  throw lastError;
+}
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Retailer search runs here rather than in the content script: a page like
@@ -25,7 +40,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message?.type !== "GREENSWAP_ANALYZE") return false;
 
-  fetch(`${API_BASE}/analyze`, {
+  callBackend("/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(message.product),
