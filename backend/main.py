@@ -467,6 +467,9 @@ def cache_put(key: str, product: Product, estimate: dict):
         "citations": estimate.get("citations") or [],
         "verified": bool(estimate.get("verified")),
         "certification": estimate.get("certification"),
+        # Without this a cached rule-based score comes back labelled as an AI
+        # estimate, which is precisely the confusion the labels exist to stop.
+        "source": estimate.get("source"),
     }
     if supabase:
         # upsert so concurrent shoppers viewing the same product cannot collide
@@ -525,10 +528,10 @@ def offline_estimate(product: Product, note: str | None = None) -> dict:
         "verified": False,
         "source": "heuristic",
         "eco_score": rules["eco_score"],
-        "reason": note or heuristics.explain(rules) if rules["confident"] else note or (
+        "reason": note or (heuristics.explain(rules) if rules["confident"] else (
             "Scored cautiously from the product name alone — AI analysis "
             "is not configured, so materials could not be inferred."
-        ),
+        )),
     }
 
 

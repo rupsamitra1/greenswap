@@ -260,7 +260,7 @@
     }
     .row-go:hover { background: var(--gs-green-deep); }
     .row-go:focus-visible { outline: 2px solid var(--gs-green); outline-offset: 2px; }
-    .row-go::after { content: " 92"; }
+    .row-go::after { content: " →"; }
     .row-why { font-size: 12.5px; line-height: 1.45; color: var(--gs-muted); margin-top: 4px; }
     .row-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 
