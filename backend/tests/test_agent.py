@@ -26,8 +26,12 @@ class Stub:
         item = self.script.pop(0)
         return item() if callable(item) else item
 
+# Tests must not depend on local .env settings; the agent is what we're testing.
+main.AGENT_ENABLED = True
+
 DEPS = {"lookup_certified": main.lookup_certified,
-        "find_alternatives": main.find_alternatives}
+        "find_alternatives": main.find_alternatives,
+        "live_listings": []}
 
 def run(script):
     return A.run_agent(Stub(script), "dep", "Title: x", DEPS, main.parse_model_json)

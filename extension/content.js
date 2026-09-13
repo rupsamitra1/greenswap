@@ -520,15 +520,33 @@
   const product = self.GreenSwapScrapers.detect();
   if (!product || !product.title) return;
 
-  chrome.runtime.sendMessage(
-    { type: "GREENSWAP_ANALYZE", product },
-    (response) => {
-      if (chrome.runtime.lastError || !response) return;
-      if (!response.ok) {
-        console.warn("[GreenSwap]", response.error);
-        return;
-      }
-      mount(response.data);
+  /**
+   * Look for real alternatives on the store before asking the backend, so the
+   * agent reasons about listings that actually exist -- with real prices and
+   * real product links -- rather than a small hand-kept catalog.
+   *
+   * The search happens here rather than server-side because this code is
+   * already inside the retailer's origin with the shopper's session.
+   */
+  async function start() {
+    try {
+      product.listings = await self.GreenSwapScrapers.findCandidates(product);
+    } catch (err) {
+      product.listings = []; // a failed search must not cost us the card
     }
-  );
+
+    chrome.runtime.sendMessage(
+      { type: "GREENSWAP_ANALYZE", product },
+      (response) => {
+        if (chrome.runtime.lastError || !response) return;
+        if (!response.ok) {
+          console.warn("[GreenSwap]", response.error);
+          return;
+        }
+        mount(response.data);
+      }
+    );
+  }
+
+  start();
 })();

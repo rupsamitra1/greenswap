@@ -265,6 +265,21 @@ _memory_cache: dict[str, dict] = {}
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
+class Listing(BaseModel):
+    """One real search result the extension pulled from the retailer.
+
+    The browser does this fetch, not the server: the content script is already
+    inside the retailer's origin with the shopper's own session, so results
+    load the way they would for any visitor. A server doing it would be
+    scraping from a datacenter IP and would be blocked in short order.
+    """
+
+    name: str
+    price: float | None = None
+    url: str | None = None
+    source: str | None = "live"
+
+
 class Product(BaseModel):
     """Structured product data scraped from the page by the content script."""
 
@@ -275,6 +290,8 @@ class Product(BaseModel):
     image_url: str | None = None
     url: str | None = None
     retailer: str | None = None
+    # Candidate alternatives the extension already fetched from the store.
+    listings: list[Listing] = []
 
 
 # ---------------------------------------------------------------------------
@@ -614,7 +631,8 @@ def estimate_with_ai(product: Product) -> dict:
                 raw = agent_mod.run_agent(
                     llm_client, MODEL_NAME, listing,
                     {"lookup_certified": lookup_certified,
-                     "find_alternatives": find_alternatives},
+                     "find_alternatives": find_alternatives,
+                     "live_listings": [l.model_dump() for l in product.listings]},
                     parse_model_json,
                 )
                 result = normalize_estimate(raw, product.title)
@@ -624,6 +642,7 @@ def estimate_with_ai(product: Product) -> dict:
                 result["verified"] = bool(raw.get("verified"))
                 result["certification"] = raw.get("certification")
                 result["agent_steps"] = len(raw.get("tool_calls", []))
+                result["picks"] = raw.get("picks", [])
                 llm_status["agent_runs"] += 1
                 llm_status["last_error"] = None
                 return result
@@ -735,7 +754,7 @@ def buy_url(row: dict, retailer: str | None = None) -> str:
     affiliate tag attaches when there is one.
     """
     if row.get("url"):
-        return row["url"]
+        return row["url"]  # a real listing link beats a search link
 
     terms = " ".join(filter(None, [row.get("brand"), row.get("name")]))
     query = urllib.parse.quote_plus(terms)
@@ -816,6 +835,32 @@ def analyze(product: Product):
         min_score=original["eco_score"] + ECO_SCORE_MARGIN,
         max_price=original["price"] if price_known else None,
     )
+
+    # Live picks from the store, chosen by the agent from listings the browser
+    # actually saw. The price ceiling and the score margin are applied HERE,
+    # in code: the model proposes, but it cannot talk its way past the promise
+    # the product is built on.
+    live_picks = []
+    for pick in (estimate.get("picks") if not certified else None) or []:
+        price = pick.get("price")
+        if price is None:
+            continue
+        if price_known and price > original["price"]:
+            continue
+        if pick["eco_score"] < original["eco_score"] + ECO_SCORE_MARGIN:
+            continue
+        live_picks.append(pick)
+
+    if live_picks:
+        # Real listings come first. The seeded catalog is demo data -- those
+        # products do not exist on the store the shopper is looking at, so
+        # letting them outrank a real buyable listing would be recommending
+        # something they cannot purchase.
+        live_picks.sort(key=lambda a: (-a["eco_score"], a.get("price") or 0))
+        seen = {p["name"].lower() for p in live_picks}
+        alternatives = (
+            live_picks + [a for a in alternatives if a["name"].lower() not in seen]
+        )[:3]
 
     # Greener options above the price are always computed, but the card keeps
     # them behind an explicit opt-in whether or not cheaper ones exist. The
