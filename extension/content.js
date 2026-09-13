@@ -378,8 +378,11 @@
             </div>`;
   }
 
-  function renderRow(alt, index) {
-    const best = index === 0;
+  function renderRow(alt, index, all, opts = {}) {
+    // Only the cheaper list has a "best swap". Tagging the first dearer option
+    // that way says the best thing to do is spend more, which is the opposite
+    // of what this product promises.
+    const best = index === 0 && opts.tagBest !== false;
     return `
       <div class="row ${best ? "best" : ""}">
         ${best ? `<span class="tag">Best swap</span>` : ""}
@@ -430,7 +433,9 @@
         : `Show ${pricier.length} that cost more`;
       body += `
         <button class="reveal" aria-expanded="false">${label}</button>
-        <div class="pricier rows" hidden>${pricier.map(renderRow).join("")}</div>`;
+        <div class="pricier rows" hidden>${pricier
+          .map((alt, i, all) => renderRow(alt, i, all, { tagBest: false }))
+          .join("")}</div>`;
     }
 
     // Showing the current price alongside makes the comparison concrete
