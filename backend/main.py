@@ -32,6 +32,7 @@ from pathlib import Path
 
 import agent as agent_mod
 import heuristics
+import product_search
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -156,6 +157,11 @@ llm_status: dict = {"calls": 0, "failures": 0, "last_error": None, "json_mode": 
 # primary revenue stream in the business model; without it the links still work,
 # they just earn nothing.
 AMAZON_AFFILIATE_TAG = _clean(os.getenv("AMAZON_AFFILIATE_TAG"))
+
+# Fallback product search, used only when the browser's own scrape comes back
+# empty. The free tier is 100 requests/month, so results are cached by query.
+CANOPY_API_KEY = _clean(os.getenv("CANOPY_API_KEY"))
+_search_cache: dict[str, list[dict]] = {}
 
 # An alternative must beat the original by this much to be worth suggesting.
 ECO_SCORE_MARGIN = 10
@@ -894,6 +900,21 @@ def analyze(product: Product):
         )
 
     on_real_store = bool(product.retailer) and product.retailer != "mockstore"
+
+    # The browser scrape is preferred: it is free and shows what the shopper
+    # would see. This only runs when it returned nothing.
+    if on_real_store and not product.listings and CANOPY_API_KEY:
+        for query in product_search.greener_queries(product.title):
+            if query in _search_cache:
+                product.listings += [Listing(**l) for l in _search_cache[query]]
+                continue
+            try:
+                found = product_search.search(query, CANOPY_API_KEY)
+                _search_cache[query] = found
+                product.listings += [Listing(**l) for l in found]
+                print(f"[GreenSwap] product API: {len(found)} results for {query!r}")
+            except Exception as exc:
+                print(f"[GreenSwap] product API failed for {query!r}: {exc}")
 
     if on_real_store and not product.listings:
         # The retailer search came back empty -- its markup may have changed.

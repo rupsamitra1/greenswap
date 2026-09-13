@@ -18,6 +18,23 @@
     return null;
   }
 
+  /**
+   * Longest matching text across several selectors.
+   *
+   * Picking the first match is wrong on search results: a brand label and a
+   * product title both live under an h2, and the brand usually comes first.
+   */
+  function longestText(root, selectors) {
+    let best = "";
+    for (const selector of selectors) {
+      for (const el of root.querySelectorAll(selector)) {
+        const value = el.textContent.trim().replace(/\s+/g, " ");
+        if (value.length > best.length) best = value;
+      }
+    }
+    return best || null;
+  }
+
   function parsePrice(raw) {
     if (!raw) return null;
     const match = raw.replace(/,/g, "").match(/\d+(\.\d+)?/);
@@ -176,8 +193,18 @@
       if (!asin || seenAsins.has(asin)) continue;
       seenAsins.add(asin);
 
-      const name = text(card, ["h2 span", "h2 a span", ".a-size-medium"]);
-      if (!name) continue;
+      // Amazon puts the brand in its own h2-adjacent span, so "first selector
+      // that matches" reliably returns "YETI" instead of the product name.
+      // Titles are long and brands are short, so take the longest candidate.
+      const name = longestText(card, [
+        '[data-cy="title-recipe"] h2 span',
+        "h2 a span",
+        "h2 span",
+        ".a-size-medium",
+        ".a-size-base-plus",
+        "h2",
+      ]);
+      if (!name || name.length < 12) continue;
 
       const price = parsePrice(
         text(card, [".a-price .a-offscreen", ".a-price-whole"])
