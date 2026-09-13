@@ -61,7 +61,22 @@ app.add_middleware(
     allow_origins=["*"],  # tighten for production
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=600,
 )
+
+@app.middleware("http")
+async def allow_private_network(request, call_next):
+    """Permit requests from a public page to this local server.
+
+    Chrome's Private Network Access rules gate requests that originate from a
+    public site (amazon.com) toward a private address (localhost). Without this
+    header the extension works on the local mock store and fails on Amazon --
+    which looks like a backend outage rather than a browser policy.
+    """
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
+
 
 # The mock storefront is served by this same process so the extension only ever
 # needs one origin permission (http://localhost:8000/*).

@@ -545,6 +545,15 @@
       product.listings = []; // a failed search must not cost us the card
     }
 
+    // Reloading the extension orphans content scripts already running in open
+    // tabs: chrome.runtime disappears underneath them. Awaiting the retailer
+    // search widens that window, so check before using it rather than throwing
+    // an uncaught error into the page.
+    if (!chrome.runtime?.id) {
+      console.warn("[GreenSwap] extension reloaded; refresh this page");
+      return;
+    }
+
     chrome.runtime.sendMessage(
       { type: "GREENSWAP_ANALYZE", product },
       (response) => {

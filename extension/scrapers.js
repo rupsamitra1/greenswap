@@ -94,9 +94,14 @@
     const url = `https://www.amazon.com/s?k=${encodeURIComponent(query)}`;
     let doc;
     try {
-      const res = await fetch(url, { credentials: "include" });
-      if (!res.ok) return [];
-      doc = new DOMParser().parseFromString(await res.text(), "text/html");
+      const res = await new Promise((resolve) => {
+        if (!chrome.runtime?.id) return resolve({ ok: false, error: "no context" });
+        chrome.runtime.sendMessage({ type: "GREENSWAP_SEARCH", url }, (r) =>
+          resolve(chrome.runtime.lastError ? { ok: false } : r)
+        );
+      });
+      if (!res?.ok) return [];
+      doc = new DOMParser().parseFromString(res.html, "text/html");
     } catch (err) {
       return []; // never let a failed search break the card
     }
