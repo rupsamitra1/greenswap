@@ -146,6 +146,12 @@ LLM_RPM = int(_clean(os.getenv("LLM_RPM")) or 5)
 # rather than leave a product page hanging.
 LLM_MAX_WAIT = float(_clean(os.getenv("LLM_MAX_WAIT")) or 8)
 
+# Hard ceiling on a single /analyze. Chrome terminates an MV3 service worker
+# that sits idle for roughly 30 seconds, so a slow answer is not a slow answer
+# -- it is no answer at all, and the card never renders. Past this we return
+# the rules-based result, which is always ready.
+ANALYZE_DEADLINE = float(_clean(os.getenv("ANALYZE_DEADLINE")) or 18)
+
 # Surfaced by /health and /selftest so a misconfigured key is visible rather
 # than silently degrading into the offline fallback.
 AGENT_ENABLED = (_clean(os.getenv("GREENSWAP_AGENT")) or "on").lower() != "off"
@@ -647,14 +653,25 @@ def call_llm(listing: str) -> dict:
         raise
 
 
-def estimate_with_ai(product: Product) -> dict:
+def estimate_with_ai(product: Product, deadline: float | None = None) -> dict:
     if not llm_client:
         return offline_estimate(product)
+
+    def remaining() -> float:
+        return 1e9 if deadline is None else deadline - time.monotonic()
+
+    # An agent run is several sequential calls; do not start one we cannot
+    # finish inside the budget.
+    if remaining() < 12:
+        return offline_estimate(product, note=(
+            "Scored from the listing text — the AI was too slow to answer "
+            "within the time a page should wait."
+        ))
 
     llm_status["calls"] += 1
     try:
         listing = build_listing(product)
-        if AGENT_ENABLED:
+        if AGENT_ENABLED and remaining() > 12:
             try:
                 raw = agent_mod.run_agent(
                     llm_client, MODEL_NAME, listing,
@@ -682,6 +699,11 @@ def estimate_with_ai(product: Product) -> dict:
                 llm_status["last_error"] = f"agent: {type(exc).__name__}: {exc}"
                 print(f"[GreenSwap] agent failed, using single call: {exc}")
 
+        if remaining() < 3:
+            return offline_estimate(product, note=(
+                "Scored from the listing text — the AI was too slow to answer "
+                "within the time a page should wait."
+            ))
         raw = call_llm(listing)
         result = normalize_estimate(raw, product.title)
         result["source"] = "model"
@@ -813,6 +835,7 @@ def _program_citation(certification: str | None) -> list[dict]:
 
 @app.post("/analyze")
 def analyze(product: Product):
+    deadline = time.monotonic() + ANALYZE_DEADLINE
     certified = lookup_certified(product.title)
     cached = False
 
@@ -835,7 +858,7 @@ def analyze(product: Product):
         if estimate:
             cached = True
         else:
-            estimate = estimate_with_ai(product)
+            estimate = estimate_with_ai(product, deadline=deadline)
             cache_put(key, product, estimate)
 
         # The agent may have verified this against the certification database.
