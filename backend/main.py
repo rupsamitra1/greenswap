@@ -879,10 +879,11 @@ def analyze(product: Product):
             continue
         live_picks.append(pick)
 
-    # No model answered, but the browser still scraped real listings. Rank them
-    # with the same rubric so the shopper gets genuine, buyable alternatives
-    # instead of a seeded catalog -- degraded, but still the actual product.
-    if not live_picks and estimate.get("source") == "heuristic" and product.listings:
+    # Whenever the agent did not choose for us -- it is switched off, the model
+    # answered in one call, or the quota ran out -- rank the scraped listings
+    # with the rules engine instead. Otherwise a real store would show nothing
+    # at all, since the catalog is rightly excluded there.
+    if not live_picks and product.listings:
         live_picks = heuristics.rank_listings(
             [l.model_dump() for l in product.listings],
             min_score=original["eco_score"] + ECO_SCORE_MARGIN,
