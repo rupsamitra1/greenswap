@@ -298,6 +298,10 @@
     .empty, .notice { font-size: 13px; line-height: 1.5; }
     .empty { padding: 2px 16px 14px; color: var(--gs-muted); }
     .why { margin-top: 6px; font-size: 12px; opacity: .85; }
+    .tier-note {
+      margin: 0 16px 8px; font-size: 12px; line-height: 1.45;
+      color: var(--gs-muted);
+    }
     .near-label { margin-top: 7px; font-weight: 600; opacity: .9; }
     .near { margin-top: 3px; font-size: 11.5px; opacity: .8; }
     .notice {
@@ -494,6 +498,29 @@
       body = `<div class="empty">No greener option at or below this price yet.
                 We never suggest an alternative that costs more.
                 <div class="why">${why}</div></div>`;
+    }
+
+    // Two further kinds of answer, each framed for what it actually is.
+    const betterFormat = data.better_format || [];
+    const longerTerm = data.longer_term || [];
+
+    if (betterFormat.length) {
+      body += `
+        <div class="section">Same format, better material</div>
+        <div class="tier-note">Still single-use, but a lower-impact material.</div>
+        <div class="rows">${betterFormat
+          .map((alt, i, all) => renderRow(alt, i, all, { tagBest: false }))
+          .join("")}</div>`;
+    }
+
+    if (longerTerm.length) {
+      body += `
+        <div class="section">Longer-term swap</div>
+        <div class="tier-note">Replaces repeat purchases rather than matching
+          this pack — better for the planet, different for your basket.</div>
+        <div class="rows">${longerTerm
+          .map((alt, i, all) => renderRow(alt, i, all, { tagBest: false }))
+          .join("")}</div>`;
     }
 
     if (pricier.length) {

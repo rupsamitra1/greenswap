@@ -376,10 +376,19 @@
       .slice(0, 3)
       .join(" ");
     if (!base) return [];
-    // One query, not two. Each search is a multi-megabyte download, and firing
-    // two on every product page both doubled the wait and made Amazon throttle
-    // us. "reusable" is the single most productive term.
-    return [`reusable ${base}`];
+
+    // Someone buying fifty cups for a party is not served by one tumbler. When
+    // the product is a bulk disposable, also look for the same format in a
+    // better material -- compostable or paper -- so a like-for-like swap is at
+    // least a candidate. Otherwise one "reusable" query is enough, and each
+    // search is a multi-megabyte download worth avoiding.
+    const bulkDisposable =
+      /(\d{2,4})\s*[- ]?(?:pack|pk|count|ct|pcs)|set of\s+\d{2,4}/.test(
+        (product.title || "").toLowerCase()
+      );
+    return bulkDisposable
+      ? [`reusable ${base}`, `compostable ${base}`]
+      : [`reusable ${base}`];
   }
 
   // Words naming the problem. Searching for them finds more of the problem.

@@ -994,6 +994,8 @@ def analyze(product: Product):
                 print(f"[GreenSwap] product API failed for {query!r}: {exc}")
 
     scored_listings = []
+    better_format: list[dict] = []
+    longer_term: list[dict] = []
     if on_real_store:
         scored_listings = [
             heuristics.score_listing(listing.model_dump())
@@ -1017,7 +1019,33 @@ def analyze(product: Product):
                 max_price=original["price"] if price_known else None,
             )
         live_picks.sort(key=lambda item: (-item["eco_score"], item.get("price") or 0))
-        alternatives = live_picks[:3]
+
+        # A single durable item is not a like-for-like swap for a bulk pack.
+        # It is still the better environmental answer, so it moves to its own
+        # framing rather than being dropped or sold as "save $1.00".
+        longer_term = [
+            item for item in live_picks
+            if heuristics.quantity_mismatch(product.title, item["name"])
+        ][:2]
+        mismatched = {item.get("url") for item in longer_term}
+        alternatives = [item for item in live_picks
+                        if item.get("url") not in mismatched][:3]
+
+        # Nothing reusable qualified. Somebody buying fifty cups for a party
+        # cannot use one tumbler, so offer the same format in a better material
+        # -- compostable, paper, bagasse -- clearly marked as still single-use.
+        # "Nothing" is honest but not always the most useful honest answer.
+        # A reusable option often exists but is not a like-for-like swap: one
+        # tumbler does not replace a fifty-pack for a party. Rather than hide it
+        # or pretend it is equivalent, offer it framed for what it is -- a
+        # change of habit that replaces repeat purchases.
+        if not alternatives:
+            better_format = heuristics.better_same_format(
+                [listing.model_dump() for listing in product.listings
+                 if heuristics.same_product_type(product.title, listing.name)],
+                viewed_score=original["eco_score"],
+                max_price=original["price"] if price_known else None,
+            )
 
         dearer = heuristics.rank_listings(
             [listing.model_dump() for listing in product.listings
@@ -1098,6 +1126,27 @@ def analyze(product: Product):
             {"label": "Compare", "detail": f"{len(scored_listings) if on_real_store else len(evaluated_candidates)} products run through the same rubric"},
         ],
         "diagnostics": diagnostics,
+        "longer_term": [
+            {
+                "id": item["id"], "name": item["name"], "price": item.get("price"),
+                "eco_score": item["eco_score"], "trust": item["trust"],
+                "certification": None, "reason": item["reason"],
+                "url": buy_url(item, product.retailer),
+                "savings": None,
+            }
+            for item in longer_term
+        ],
+        "better_format": [
+            {
+                "id": item["id"], "name": item["name"], "price": item.get("price"),
+                "eco_score": item["eco_score"], "trust": item["trust"],
+                "certification": None, "reason": item["reason"],
+                "url": buy_url(item, product.retailer),
+                "savings": (round(original["price"] - (item.get("price") or 0), 2)
+                            if price_known else None),
+            }
+            for item in better_format
+        ],
         "ranking": {k: v for k, v in ranking.items() if k != "candidates"},
         "keep_current": ranking["keep_current"] if not on_real_store else False,
         "pricier": [public_candidate(a, True) for a in pricier],

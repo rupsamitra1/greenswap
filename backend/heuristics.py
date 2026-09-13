@@ -36,8 +36,17 @@ POSITIVE = [
 
 # Rubric ceilings. A product that says "single-use" cannot climb out of the
 # bottom band by also saying "recycled" -- the disposal dominates.
-SINGLE_USE_CEILING = 30
+# Single-use caps, graded by material. A flat ceiling made a compostable cup
+# and a plastic one score identically, so "better disposable" could not be
+# expressed at all -- which is why a shopper buying fifty cups was offered
+# nothing but a single tumbler. Reusable still beats all of these.
+SINGLE_USE_CEILING = 30          # plastic and unspecified
+SINGLE_USE_PLANT_CEILING = 40    # PLA, plant-derived
+SINGLE_USE_COMPOSTABLE_CEILING = 48  # compostable, paper, bagasse
 DURABLE_FLOOR = 55
+
+COMPOSTABLE_SIGNAL = re.compile(r"\b(compostable|bagasse|sugarcane|paper|bamboo)\b")
+PLANT_SIGNAL = re.compile(r"\b(plant[- ]based|plant[- ]derived|pla)\b")
 
 # Nobody buys fifty cups to keep. A bulk pack of drinkware or tableware is
 # disposable whether or not the listing uses the word, and without this a
@@ -94,7 +103,13 @@ def analyze_text(text: str) -> dict:
     durable = "durable material" in found_positive or "reusable or refillable" in found_positive
 
     if single_use:
-        score = min(score, SINGLE_USE_CEILING)
+        if COMPOSTABLE_SIGNAL.search(lowered):
+            ceiling = SINGLE_USE_COMPOSTABLE_CEILING
+        elif PLANT_SIGNAL.search(lowered):
+            ceiling = SINGLE_USE_PLANT_CEILING
+        else:
+            ceiling = SINGLE_USE_CEILING
+        score = min(score, ceiling)
     elif durable:
         score = max(score, DURABLE_FLOOR)
 
@@ -180,6 +195,67 @@ def score_listing(listing: dict) -> dict:
         "source": listing.get("source", "live"),
         "confident": result["confident"],
     }
+
+
+# Materials that make a single-use item meaningfully better than plastic. Not
+# as good as reusable, but a real improvement and often the only like-for-like
+# option: somebody buying fifty cups for a party cannot use one tumbler.
+BETTER_FORMAT = re.compile(
+    r"\b(compostable|biodegradable|paper|bamboo|plant[- ]based|plant[- ]derived|"
+    r"bagasse|sugarcane|pla|recycled)\b"
+)
+
+
+def pack_count(text: str) -> int | None:
+    """How many units a listing sells, when it says."""
+    found = BULK_COUNT.search(f" {(text or '').lower()} ")
+    if not found:
+        return None
+    return int(next(g for g in found.groups() if g))
+
+
+def quantity_mismatch(viewed: str, candidate: str) -> bool:
+    """True when a swap would not meet the need the shopper is shopping for.
+
+    Fifty cups is someone hosting; one tumbler is someone commuting. The
+    tumbler is the better environmental answer and the worse shopping answer,
+    so it belongs in a differently framed suggestion rather than presented as
+    a like-for-like swap with a dollar saving attached.
+    """
+    viewed_count = pack_count(viewed)
+    if not viewed_count or viewed_count < BULK_THRESHOLD:
+        return False
+    candidate_count = pack_count(candidate) or 1
+    return candidate_count < BULK_THRESHOLD
+
+
+def better_same_format(listings: list[dict], viewed_score: int,
+                       max_price: float | None, margin: int = 8,
+                       limit: int = 2) -> list[dict]:
+    """Same-format alternatives in a better material.
+
+    Used only when nothing reusable qualifies. These stay single-use, so they
+    are held to a clearly lower bar than a durable product and must be labelled
+    as the compromise they are -- the point is that "nothing" is not always the
+    most useful honest answer.
+    """
+    picks = []
+    for listing in listings or []:
+        name = listing.get("name", "")
+        if not BETTER_FORMAT.search(name.lower()):
+            continue
+        if listing.get("price") is None:
+            continue
+        if max_price is not None and listing["price"] > max_price:
+            continue
+        scored = score_listing(listing)
+        if scored["eco_score"] < viewed_score + margin:
+            continue
+        scored["tier"] = "better_format"
+        picks.append(scored)
+
+    picks.sort(key=lambda c: (-c["eco_score"], c.get("price") or 0))
+    return picks[:limit]
 
 
 def rank_listings(listings: list[dict], min_score: int,
