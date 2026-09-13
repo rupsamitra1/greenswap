@@ -270,21 +270,31 @@ def run_agent(client, deployment: str, listing: str, deps: dict, parse_json,
             result["tool_calls"] = evidence.tool_calls
             return result
 
-        messages.append({
-            "role": "assistant",
-            "content": message.content or "",
-            "tool_calls": [
-                {
-                    "id": c.id,
-                    "type": "function",
-                    "function": {
-                        "name": c.function.name,
-                        "arguments": c.function.arguments,
-                    },
-                }
-                for c in calls
-            ],
-        })
+        # Resend the assistant turn VERBATIM. Gemini 3.x attaches an encrypted
+        # thought_signature to each function call (under extra_content.google)
+        # and rejects the next request if it is missing -- reconstructing the
+        # message by hand silently drops it. model_dump keeps provider-specific
+        # fields; the manual branch is for clients that do not provide it.
+        if hasattr(message, "model_dump"):
+            assistant = message.model_dump(exclude_none=True)
+            assistant.pop("function_call", None)  # deprecated, and rejected
+            messages.append(assistant)
+        else:
+            messages.append({
+                "role": "assistant",
+                "content": message.content or "",
+                "tool_calls": [
+                    {
+                        "id": c.id,
+                        "type": "function",
+                        "function": {
+                            "name": c.function.name,
+                            "arguments": c.function.arguments,
+                        },
+                    }
+                    for c in calls
+                ],
+            })
 
         for call in calls:
             try:

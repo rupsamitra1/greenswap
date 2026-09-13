@@ -112,7 +112,7 @@ REQUEST_TIMEOUT = float(
 # and the model id differ.
 PROVIDER = (_clean(os.getenv("GREENSWAP_PROVIDER")) or "auto").lower()
 GEMINI_API_KEY = _clean(os.getenv("GEMINI_API_KEY"))
-GEMINI_MODEL = _clean(os.getenv("GEMINI_MODEL")) or "gemini-2.0-flash"
+GEMINI_MODEL = _clean(os.getenv("GEMINI_MODEL")) or "gemini-3.6-flash"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 # Surfaced by /health and /selftest so a misconfigured key is visible rather
@@ -809,7 +809,14 @@ def selftest():
         elif "400" in message and "api key" in low:
             hint = "Key malformed. Re-copy it; Google AI Studio keys start with 'AIza'."
         elif "404" in message or "not found" in low:
-            hint = (f"Model '{MODEL_NAME}' not found. Try GEMINI_MODEL=gemini-2.0-flash."
+            # Google names the replacement model in its own error when one is
+            # retired; quoting it beats guessing a name that may also be stale.
+            suggested = re.search(r"use models/([\w.-]+)", message)
+            hint = ((f"Model '{MODEL_NAME}' is unavailable. Set "
+                     f"GEMINI_MODEL={suggested.group(1)} in backend/.env and restart."
+                     if suggested else
+                     f"Model '{MODEL_NAME}' not found. Check GEMINI_MODEL against "
+                     f"https://aistudio.google.com/.")
                     if gemini else
                     "Deployment not found. AZURE_OPENAI_DEPLOYMENT must be the "
                     "deployment NAME you chose in Azure AI Foundry, not the model name.")
